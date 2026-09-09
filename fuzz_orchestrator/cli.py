@@ -81,6 +81,9 @@ seed = 1337
 [engine]
 backend = "builtin" # builtin, aflpp, libfuzzer, command
 scheduler = "feedback" # random or feedback
+corpus_backend = "python" # python or rust (optional local IPC)
+# corpus_command = ["salomon-corpusd"]
+corpus_batch_size = 32
 
 [corpus]
 directory = "seeds"
@@ -132,6 +135,10 @@ dictionary = ["\\r\\n", "{}", "null"]
 
 [engine]
 type = "builtin" # builtin, aflpp, libfuzzer or command
+# Optional local Rust corpus backend; Python remains the default.
+# corpus_backend = "rust"
+# corpus_command = ["salomon-corpusd"]
+# corpus_batch_size = 32
 
 # Network access is disabled by default. Keep it disabled for binary targets.
 [safety]
@@ -352,7 +359,10 @@ def _fuzz(args: argparse.Namespace) -> int:
     config = _quick_config(args)
     engine = FuzzEngine(config)
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+        try:
+            print(json.dumps({"dry_run": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+        finally:
+            engine.close()
         return 0
     on_finding = None
     if args.verbose:
@@ -360,7 +370,12 @@ def _fuzz(args: argparse.Namespace) -> int:
             print(f"[finding] case={result.case_id} status={result.status}")
 
         on_finding = print_finding
-    summary = engine.run(on_finding=on_finding)
+    try:
+        summary = engine.run(on_finding=on_finding)
+    finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
     print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
     return 0 if summary.findings == 0 else 1
 
@@ -384,7 +399,12 @@ def _load_engine(
 
 def _validate(args: argparse.Namespace) -> int:
     engine = _load_engine(args.config, args)
-    print(json.dumps({"valid": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+    try:
+        print(json.dumps({"valid": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+    finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
     return 0
 
 
@@ -393,7 +413,12 @@ def _run(args: argparse.Namespace) -> int:
         raise ConfigError("--limit doit être >= 1")
     engine = _load_engine(args.config, args)
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+        try:
+            print(json.dumps({"dry_run": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+        finally:
+            close = getattr(engine, "close", None)
+            if close is not None:
+                close()
         return 0
     on_finding = None
     if args.verbose:
@@ -401,7 +426,12 @@ def _run(args: argparse.Namespace) -> int:
             print(f"[finding] case={result.case_id} status={result.status}")
 
         on_finding = print_finding
-    summary = engine.run(limit=args.limit, on_finding=on_finding)
+    try:
+        summary = engine.run(limit=args.limit, on_finding=on_finding)
+    finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
     print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
     if args.verbose and summary.findings:
         if getattr(summary, "engine_type", "builtin") == "builtin":

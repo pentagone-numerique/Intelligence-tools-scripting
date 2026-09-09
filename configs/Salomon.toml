@@ -15,6 +15,11 @@ seed = 1337
 backend = "builtin"
 # random or feedback
 scheduler = "feedback"
+# Python is the default; rust uses the optional local salomon-corpusd helper.
+corpus_backend = "python"
+corpus_batch_size = 32
+# corpus_backend = "rust"
+# corpus_command = ["salomon-corpusd"]
 
 [corpus]
 directory = "seeds"

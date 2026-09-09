@@ -15,7 +15,8 @@
 - [x] scheduler random/feedback pondéré et reproductible
 - [x] index de couverture natif sur bitmap 65 536 octets
 - [x] protocole IPC local v1 et client Python optionnel
-- [ ] intégration batch FFI/IPC dans le moteur Python
+- [x] intégration batch IPC opt-in avec fallback Python
+- [ ] FFI in-process pour réduire le coût de frontière
 - [ ] forkserver POSIX
 - [ ] import/export AFL++ queue
 

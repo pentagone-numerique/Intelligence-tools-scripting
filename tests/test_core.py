@@ -63,10 +63,24 @@ class NativeCorpusTests(unittest.TestCase):
                     print("PONG", flush=True)
                 elif fields[0] == "ADD":
                     print(f"ENTRY 1 - 3 0 {fields[2]} 0 0 -", flush=True)
+                elif fields[0] == "ADD_BATCH":
+                    count = int(fields[1])
+                    print(f"BATCH {count}", flush=True)
+                    for item in range(count):
+                        print(f"ENTRY {item + 1} - 3 0 {fields[3 + item * 2]} 0 0 -", flush=True)
+                    print("END BATCH", flush=True)
                 elif fields[0] == "NEXT":
                     print("ENTRY 1 - 3 0 YWJj 0 0 -", flush=True)
+                elif fields[0] == "NEXT_BATCH":
+                    count = int(fields[1])
+                    print(f"BATCH {count}", flush=True)
+                    for item in range(count):
+                        print(f"ENTRY {item + 1} - 3 0 YWJj 0 0 -", flush=True)
+                    print("END BATCH", flush=True)
                 elif fields[0] == "FEEDBACK":
                     print("OK FEEDBACK", flush=True)
+                elif fields[0] == "FEEDBACK_BATCH":
+                    print("OK FEEDBACK_BATCH", flush=True)
                 elif fields[0] == "STATS":
                     print("STATS 1 3 100 1024", flush=True)
                 elif fields[0] == "QUIT":
@@ -87,8 +101,14 @@ class NativeCorpusTests(unittest.TestCase):
             self.assertIsInstance(added, NativeCorpusEntry)
             self.assertEqual(added.input_id, 1)
             self.assertEqual(added.data, bytes([0]) + b"seed")
+            added_batch = client.add_many([(b"a", None), (b"bb", 1)])
+            self.assertEqual([entry.data for entry in added_batch], [b"a", b"bb"])
             self.assertEqual(client.next().data, b"abc")
+            next_batch = client.next_batch(2)
+            self.assertEqual(len(next_batch), 2)
+            self.assertEqual([entry.data for entry in next_batch], [b"abc", b"abc"])
             client.feedback(1, energy=10, favored=True, new_edges=2, interesting=True, bitmap_hash=b"x" * 32)
+            client.feedback_many([(1, 4, True, 0, False, None)])
             self.assertEqual(client.stats().entries, 1)
         finally:
             client.close()
@@ -290,6 +310,83 @@ class EngineTests(unittest.TestCase):
             self.assertTrue((summary.run_dir / "summary.json").exists())
             self.assertTrue((summary.run_dir / "results.sqlite3").exists())
             self.assertEqual(len(list((summary.run_dir / "findings").glob("*.bin"))), 3)
+
+    def test_native_corpus_backend_is_batch_opt_in_with_python_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            worker = directory / "corpus_worker.py"
+            worker.write_text(
+                textwrap.dedent(
+                    """
+                    import sys
+                    entries = []
+                    next_id = 1
+                    for raw in sys.stdin:
+                        fields = raw.strip().split()
+                        if not fields:
+                            continue
+                        if fields[0] == "HELLO":
+                            print("HELLO 1 fake-worker", flush=True)
+                        elif fields[0] == "ADD_BATCH":
+                            count = int(fields[1])
+                            print(f"BATCH {count}", flush=True)
+                            for item in range(count):
+                                entry_id = len(entries) + 1
+                                payload = fields[3 + item * 2]
+                                entries.append((entry_id, payload))
+                                print(f"ENTRY {entry_id} - 1 0 {payload} 0 0 -", flush=True)
+                            print("END BATCH", flush=True)
+                        elif fields[0] == "NEXT_BATCH":
+                            count = min(int(fields[1]), len(entries))
+                            print(f"BATCH {count}", flush=True)
+                            for entry_id, payload in entries[:count]:
+                                print(f"ENTRY {entry_id} - 1 0 {payload} 0 0 -", flush=True)
+                            print("END BATCH", flush=True)
+                        elif fields[0] == "FEEDBACK_BATCH":
+                            print("OK FEEDBACK_BATCH", flush=True)
+                        elif fields[0] == "QUIT":
+                            print("BYE", flush=True)
+                            break
+                    """
+                ),
+                encoding="utf-8",
+            )
+            config_path = directory / "native.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[run]",
+                        "name = 'native'",
+                        "iterations = 1",
+                        "scheduler = 'feedback'",
+                        "output_dir = " + json.dumps(str(directory / "artifacts")),
+                        "[corpus]",
+                        "inline = ['seed']",
+                        "[engine]",
+                        "type = 'builtin'",
+                        "corpus_backend = 'rust'",
+                        "corpus_command = " + json.dumps([sys.executable, "-u", str(worker)]),
+                        "corpus_batch_size = 2",
+                        "[mutations]",
+                        "operations = ['bitflip']",
+                        "max_operations = 1",
+                        "[target]",
+                        "type = 'binary'",
+                        "command = ['/bin/cat']",
+                        "input_mode = 'stdin'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            engine = FuzzEngine(load_config(config_path))
+            self.assertEqual(engine.plan()["corpus_backend"], "rust")
+            summary = engine.run()
+            native_status = json.loads((summary.run_dir / "native-corpus.json").read_text())
+            result = json.loads((summary.run_dir / "results.jsonl").read_text().splitlines()[0])
+            self.assertEqual(summary.executed, 1)
+            self.assertEqual(native_status["active"], "rust")
+            self.assertEqual(result["metadata"]["corpus_source"], "rust")
+            self.assertEqual(result["metadata"]["native_corpus_id"], 1)
 
     def test_differential_target_finds_output_divergence(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

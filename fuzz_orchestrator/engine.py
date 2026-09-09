@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable
 from .config import config_to_dict
 from .models import DifferentialTargetConfig, ExecutionResult, RunConfig, TargetConfig
 from .mutations import Mutator
+from .native_corpus import NativeCorpusClient, NativeCorpusEntry, NativeCorpusError
 from .targets import Target, build_target
 
 _MAX_CORPUS_FILES = 10_000
@@ -309,6 +310,14 @@ class FuzzEngine:
         self._adaptive_hashes = {hashlib.sha256(seed).digest() for seed in self.corpus}
         self._adaptive_bytes = sum(len(seed) for seed in self.corpus)
         self._adaptive_lock = threading.Lock()
+        self._native_lock = threading.Lock()
+        self._native_corpus: NativeCorpusClient | None = None
+        self._native_prefetch: list[NativeCorpusEntry] = []
+        self._native_pending_adds: list[tuple[bytes, int | None]] = []
+        self._native_pending_feedback: list[tuple[int, int, bool, int, bool, bytes | None]] = []
+        self._native_backend = "python"
+        self._native_backend_error: str | None = None
+        self._start_native_corpus()
         is_network = _contains_network_target(self.config.target)
         self._rate_limiter = (
             RateLimiter(self.config.max_requests_per_second)
@@ -323,6 +332,126 @@ class FuzzEngine:
             config.safety,
             request_wait=request_wait,
         )
+
+    def _start_native_corpus(self) -> None:
+        if self.config.engine.corpus_backend != "rust":
+            return
+        command = self.config.engine.corpus_command or ("salomon-corpusd",)
+        client: NativeCorpusClient | None = None
+        try:
+            client = NativeCorpusClient(
+                command,
+                strategy=self.config.scheduler,
+                seed=self.config.seed,
+                max_bytes=_MAX_CORPUS_BYTES,
+                max_input_bytes=self.config.max_input_size,
+            )
+            batch_size = self.config.engine.corpus_batch_size
+            for start in range(0, len(self.corpus), batch_size):
+                seeds = self.corpus[start : start + batch_size]
+                client.add_many([(seed, None) for seed in seeds])
+        except (NativeCorpusError, OSError) as exc:
+            if client is not None:
+                try:
+                    client.close()
+                except (NativeCorpusError, OSError):
+                    pass
+            self._native_backend_error = f"{type(exc).__name__}: {exc}"
+            return
+        self._native_corpus = client
+        self._native_backend = "rust"
+
+    def _native_status(self) -> dict[str, Any]:
+        with self._native_lock:
+            return {
+                "requested": self.config.engine.corpus_backend,
+                "active": self._native_backend,
+                "batch_size": self.config.engine.corpus_batch_size,
+                "fallback_reason": self._native_backend_error,
+            }
+
+    def _disable_native_locked(self, error: Exception) -> None:
+        client = self._native_corpus
+        self._native_corpus = None
+        self._native_prefetch.clear()
+        self._native_pending_adds.clear()
+        self._native_pending_feedback.clear()
+        self._native_backend = "python"
+        self._native_backend_error = f"{type(error).__name__}: {error}"
+        if client is not None:
+            try:
+                client.close()
+            except (OSError, NativeCorpusError):
+                pass
+
+    def _next_native_entry(self) -> NativeCorpusEntry | None:
+        with self._native_lock:
+            if self._native_corpus is None:
+                return None
+            if not self._native_prefetch:
+                try:
+                    self._native_prefetch.extend(
+                        self._native_corpus.next_batch(self.config.engine.corpus_batch_size)
+                    )
+                except (NativeCorpusError, OSError) as exc:
+                    self._disable_native_locked(exc)
+                    return None
+            if not self._native_prefetch:
+                return None
+            return self._native_prefetch.pop(0)
+
+    def _queue_native_feedback(self, input_id: int) -> None:
+        with self._native_lock:
+            if self._native_corpus is not None:
+                self._native_pending_feedback.append((input_id, 4, True, 0, False, None))
+                self._flush_native_locked()
+
+    def _queue_native_add(self, payload: bytes, parent_id: int | None) -> None:
+        with self._native_lock:
+            if self._native_corpus is not None:
+                self._native_pending_adds.append((payload, parent_id))
+                self._flush_native_locked()
+
+    def _flush_native_locked(self, *, force: bool = False) -> None:
+        if self._native_corpus is None:
+            return
+        batch_size = self.config.engine.corpus_batch_size
+        pending_count = len(self._native_pending_adds) + len(self._native_pending_feedback)
+        if not force and pending_count < batch_size:
+            return
+        additions = list(self._native_pending_adds)
+        feedback = list(self._native_pending_feedback)
+        self._native_pending_adds.clear()
+        self._native_pending_feedback.clear()
+        try:
+            if feedback:
+                self._native_corpus.feedback_many(feedback)
+            if additions:
+                self._native_corpus.add_many(additions)
+        except (NativeCorpusError, OSError) as exc:
+            self._disable_native_locked(exc)
+
+    def _close_native(self) -> None:
+        with self._native_lock:
+            if self._native_corpus is None:
+                return
+            self._flush_native_locked(force=True)
+            if self._native_corpus is not None:
+                client = self._native_corpus
+                self._native_corpus = None
+                try:
+                    client.close()
+                except (OSError, NativeCorpusError):
+                    pass
+
+    def close(self) -> None:
+        self._close_native()
+
+    def __del__(self) -> None:
+        try:
+            self._close_native()
+        except Exception:
+            pass
 
     def plan(self) -> dict[str, Any]:
         return {
@@ -339,6 +468,10 @@ class FuzzEngine:
             "scheduler": self.config.scheduler,
             "max_requests_per_second": self.config.max_requests_per_second,
             "operations": list(self.config.mutations.operations),
+            "corpus_backend": self._native_backend,
+            "corpus_backend_requested": self.config.engine.corpus_backend,
+            "corpus_batch_size": self.config.engine.corpus_batch_size,
+            "corpus_backend_error": self._native_backend_error,
         }
 
     def run(
@@ -353,6 +486,7 @@ class FuzzEngine:
         run_dir = _new_run_dir(self.config)
         store = ArtifactStore(run_dir, self.config)
         store.write_manifest(len(self.corpus))
+        _write_json(run_dir / "native-corpus.json", self._native_status())
         statuses: Counter[str] = Counter()
         feedback_seen: set[str] = set()
         finding_signatures: set[str] = set()
@@ -404,6 +538,11 @@ class FuzzEngine:
                                         self._adaptive_bytes += len(payload)
                                         adaptive_seed_added = True
                         result.metadata["adaptive_seed_added"] = adaptive_seed_added
+                        native_id = result.metadata.get("native_corpus_id")
+                        if isinstance(native_id, int) and self.config.scheduler == "feedback" and is_novel:
+                            self._queue_native_feedback(native_id)
+                        if adaptive_seed_added and isinstance(native_id, int):
+                            self._queue_native_add(payload, native_id)
                         is_unique_finding = result.is_finding and signature not in finding_signatures
                         if is_unique_finding:
                             finding_signatures.add(signature)
@@ -429,7 +568,10 @@ class FuzzEngine:
                         # executor context wait for their bounded completion.
                         break
         finally:
-            store.close()
+            try:
+                self._close_native()
+            finally:
+                store.close()
 
         summary = RunSummary(
             requested=requested,
@@ -456,13 +598,25 @@ class FuzzEngine:
         case_id = f"{index:08d}"
         case_seed = self.config.seed + index
         rng = random.Random(case_seed)
-        if self.config.scheduler == "feedback":
+        native_entry = self._next_native_entry()
+        if native_entry is not None:
+            native_id: int | None = native_entry.input_id
+            seed = native_entry.data
             with self._adaptive_lock:
                 corpus = tuple(self._adaptive_corpus)
+            corpus_index = native_entry.input_id
+            corpus_source = "rust"
         else:
-            corpus = self.corpus
-        corpus_index = rng.randrange(len(corpus))
-        payload = self.mutator.mutate(corpus[corpus_index], rng, corpus)
+            native_id = None
+            if self.config.scheduler == "feedback":
+                with self._adaptive_lock:
+                    corpus = tuple(self._adaptive_corpus)
+            else:
+                corpus = self.corpus
+            corpus_index = rng.randrange(len(corpus))
+            seed = corpus[corpus_index]
+            corpus_source = "python"
+        payload = self.mutator.mutate(seed, rng, corpus)
         self._rate_delay_local.seconds = 0.0
         try:
             result = self.target.execute(payload, case_id)
@@ -481,7 +635,9 @@ class FuzzEngine:
             **result.metadata,
             "case_seed": case_seed,
             "corpus_index": corpus_index,
+            "corpus_source": corpus_source,
             "scheduler_corpus_size": len(corpus),
             "rate_limit_delay_ms": rate_delay_ms,
+            "native_corpus_id": native_id,
         }
         return result, payload

@@ -21,7 +21,9 @@ est `fuzz_orchestrator.native_corpus.NativeCorpusClient`.
 ## Protocole v1
 
 Chaque requête et chaque réponse est une ligne ASCII. Les bytes sont encodés en
-Base64, sans JSON ni ambiguïté d'échappement.
+Base64, sans JSON ni ambiguïté d'échappement. Le token `~` représente une valeur
+binaire vide, car une ligne découpée par espaces ne peut pas transporter un
+champ Base64 vide.
 
 Requête initiale :
 
@@ -39,11 +41,24 @@ PONG
 ADD <parent-id|-> <base64>
 ENTRY <id> <parent-id|-> <energy> <favored> <base64> <new-edges> <interesting> <hash|->
 
+ADD_BATCH <count> <parent-id|-> <base64> ...
+BATCH <count>
+ENTRY ...
+END BATCH
+
 NEXT
 NONE
 
+NEXT_BATCH <count>
+BATCH <count>
+ENTRY ...
+END BATCH
+
 FEEDBACK <id> <energy> <favored> <new-edges> <interesting> <hash|->
 OK FEEDBACK
+
+FEEDBACK_BATCH <count> <id> <energy> <favored> <new-edges> <interesting> <hash|-> ...
+OK FEEDBACK_BATCH
 
 STATS
 STATS <entries> <bytes> <max-entries> <max-bytes>
@@ -58,7 +73,8 @@ Les erreurs sont renvoyées ainsi :
 ERR <code> <base64-message>
 ```
 
-Le helper ne doit pas être exposé sur le réseau. L'IPC par entrée n'est pas le
-chemin par défaut du moteur : une future intégration de campagne devra
-regrouper les échanges ou utiliser une FFI in-process avant d'activer ce
-backend dans la boucle chaude.
+Le helper ne doit pas être exposé sur le réseau. L'intégration Python
+optionnelle l'utilise par lots pour l'amorçage, le préfetch des seeds et le
+feedback ; le backend Python reste le fallback automatique. Une future FFI
+in-process pourra encore réduire le coût local avant d'envisager une boucle
+native complète.

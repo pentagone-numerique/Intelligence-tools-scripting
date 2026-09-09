@@ -20,6 +20,7 @@ Avec Rust installé :
 cargo test --manifest-path rust/Cargo.toml
 ```
 
-La frontière FFI/IPC n'est pas encore activée. Le crate natif doit d'abord
-rester testable seul et servir de référence pour l'extraction progressive du
-chemin chaud Python.
+Le pont IPC batché est activé uniquement quand `engine.corpus_backend =
+"rust"`. Le crate natif reste testable seul et le backend Python reprend la
+main si le helper n'est pas disponible. Une FFI in-process pourra ensuite
+réduire le coût de la frontière pour le chemin chaud.

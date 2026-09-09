@@ -48,6 +48,7 @@ _ALLOWED_OPERATIONS = {
 _ALLOWED_INPUT_MODES = {"stdin", "file", "argv"}
 _ALLOWED_HTTP_LOCATIONS = {"body", "query", "header"}
 _ALLOWED_ENGINES = {"builtin", "aflpp", "libfuzzer", "command"}
+_ALLOWED_CORPUS_BACKENDS = {"python", "rust"}
 _MAX_ITERATIONS = 1_000_000
 _MAX_WORKERS = 64
 _MAX_INPUT_SIZE = 16 * 1024 * 1024
@@ -542,6 +543,20 @@ def _parse_engine(raw: Mapping[str, Any]) -> EngineConfig:
         minimum=1.0,
         maximum=86_400.0,
     )
+    corpus_backend = _string(raw.get("corpus_backend", "python"), "engine.corpus_backend").lower()
+    if corpus_backend not in _ALLOWED_CORPUS_BACKENDS:
+        raise ConfigError("engine.corpus_backend must be either python or rust")
+    corpus_command = tuple(_string_list(raw.get("corpus_command", []), "engine.corpus_command"))
+    corpus_batch_size = _int(
+        raw.get("corpus_batch_size", 32),
+        "engine.corpus_batch_size",
+        minimum=1,
+        maximum=1_024,
+    )
+    if any("\x00" in value for value in corpus_command):
+        raise ConfigError("engine.corpus_command arguments cannot contain NUL characters")
+    if corpus_backend == "rust" and engine_type != "builtin":
+        raise ConfigError("engine.corpus_backend = rust requires engine.type = builtin")
     if engine_type == "command":
         if not command:
             raise ConfigError("engine.command is required when engine.type = command")
@@ -555,6 +570,9 @@ def _parse_engine(raw: Mapping[str, Any]) -> EngineConfig:
         command=command,
         extra_args=extra_args,
         duration_seconds=duration_seconds,
+        corpus_backend=corpus_backend,
+        corpus_command=corpus_command,
+        corpus_batch_size=corpus_batch_size,
     )
 
 

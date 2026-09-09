@@ -40,9 +40,10 @@ Les concepts partagés sont :
 Les contrats Rust sont dans `rust/crates/salomon-core`. Le premier Corpus
 Manager/Scheduler natif est dans `rust/crates/salomon-corpus`. Un pont IPC local
 versionné est fourni par `rust/crates/salomon-corpusd` et son client Python
-optionnel dans `fuzz_orchestrator/native_corpus.py`; il ne remplace pas encore
-le backend Python par défaut. Le protocole de contrôle distribué est dans
-`proto/salomon.proto`.
+optionnel dans `fuzz_orchestrator/native_corpus.py`. Il s'active avec
+`engine.corpus_backend = "rust"`, utilise des lots et revient automatiquement
+au backend Python si le helper est absent ou tombe en panne. Le protocole de
+contrôle distribué est dans `proto/salomon.proto`.
 
 Le protocole gRPC ne doit pas transporter chaque cas dans le hot path. Un worker
 exécute localement une boucle complète et échange périodiquement des deltas de

@@ -1,16 +1,15 @@
 //! `salomon-corpusd` exposes the native corpus scheduler through a small,
-//! versioned line protocol.  It is intentionally not a network daemon: the
+//! versioned line protocol. It is intentionally not a network daemon: the
 //! Python side starts it as a local child process and communicates over pipes.
 
 use salomon_core::{CorpusEntry, CoverageDelta};
-use salomon_corpus::{
-    CorpusLimits, CorpusScheduler, SchedulerConfig, SchedulerStrategy,
-};
+use salomon_corpus::{CorpusLimits, CorpusScheduler, SchedulerConfig, SchedulerStrategy};
 use std::env;
 use std::io::{self, BufRead, Write};
 
 const PROTOCOL_VERSION: &str = "1";
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BATCH_SIZE: usize = 1_024;
 
 struct Options {
     limits: CorpusLimits,
@@ -45,14 +44,18 @@ fn main() {
             );
             continue;
         }
-        let (response, should_stop) = match handle_command(&line, &mut scheduler) {
+        let (responses, should_stop) = match handle_command(&line, &mut scheduler) {
             Ok(result) => result,
-            Err(message) => (error_response("request", &message), false),
+            Err(message) => (vec![error_response("request", &message)], false),
         };
-        if write_response(&mut stdout, &response).is_err() {
-            break;
+        let mut write_failed = false;
+        for response in responses {
+            if write_response(&mut stdout, &response).is_err() {
+                write_failed = true;
+                break;
+            }
         }
-        if should_stop {
+        if write_failed || should_stop {
             break;
         }
     }
@@ -126,80 +129,178 @@ fn parse_positive(value: &str, flag: &str) -> Result<usize, String> {
 fn handle_command(
     line: &str,
     scheduler: &mut CorpusScheduler,
-) -> Result<(String, bool), String> {
+) -> Result<(Vec<String>, bool), String> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let command = fields.first().copied().ok_or_else(|| "empty request".to_string())?;
     match command {
         "HELLO" => {
             if fields.len() != 2 || fields[1] != PROTOCOL_VERSION {
-                return Err(format!("unsupported protocol; expected version {PROTOCOL_VERSION}"));
+                return Err(format!(
+                    "unsupported protocol; expected version {PROTOCOL_VERSION}"
+                ));
             }
-            Ok(("HELLO 1 salomon-corpusd".to_string(), false))
+            Ok((single("HELLO 1 salomon-corpusd"), false))
         }
-        "PING" if fields.len() == 1 => Ok(("PONG".to_string(), false)),
+        "PING" if fields.len() == 1 => Ok((single("PONG"), false)),
         "ADD" if fields.len() == 3 => {
             let parent_id = parse_parent(fields[1])?;
             let bytes = decode_base64(fields[2])?;
             let result = scheduler
                 .add_seed(bytes, parent_id)
                 .map_err(|error| error.to_string())?;
-            Ok((format_entry(&result.entry), false))
+            Ok((single(format_entry(&result.entry)), false))
         }
+        "ADD_BATCH" => handle_add_batch(&fields, scheduler),
         "NEXT" if fields.len() == 1 => match scheduler.next_entry() {
-            Some(entry) => Ok((format_entry(&entry), false)),
-            None => Ok(("NONE".to_string(), false)),
+            Some(entry) => Ok((single(format_entry(&entry)), false)),
+            None => Ok((single("NONE"), false)),
         },
-        "FEEDBACK" if fields.len() == 7 => {
-            let id: u64 = fields[1].parse().map_err(|_| "invalid input id".to_string())?;
-            let energy: u32 = fields[2].parse().map_err(|_| "invalid energy".to_string())?;
-            let favored = parse_bool(fields[3])?;
-            let new_edges: u32 = fields[4]
-                .parse()
-                .map_err(|_| "invalid new edge count".to_string())?;
-            let interesting = parse_bool(fields[5])?;
-            let bitmap_hash = if fields[6] == "-" {
-                None
-            } else {
-                let hash = decode_base64(fields[6])?;
-                if hash.len() != 32 {
-                    return Err("bitmap hash must contain 32 bytes".to_string());
+        "NEXT_BATCH" if fields.len() == 2 => {
+            let count = parse_batch_count(fields[1])?;
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                if let Some(entry) = scheduler.next_entry() {
+                    entries.push(entry);
+                } else {
+                    break;
                 }
-                let mut value = [0u8; 32];
-                value.copy_from_slice(&hash);
-                Some(value)
-            };
-            let mut entry = scheduler
-                .corpus()
-                .get(id)
-                .cloned()
-                .ok_or_else(|| "unknown input id".to_string())?;
-            entry.energy = entry.energy.max(energy);
-            entry.favored |= favored;
-            if bitmap_hash.is_some() || new_edges > 0 || interesting {
-                entry.coverage = Some(CoverageDelta {
-                    new_edges,
-                    bitmap_hash: bitmap_hash.unwrap_or([0; 32]),
-                    interesting,
-                });
             }
-            scheduler
-                .try_promote(entry)
-                .map_err(|error| error.to_string())?;
-            Ok(("OK FEEDBACK".to_string(), false))
+            Ok((batch_response(entries), false))
+        }
+        "FEEDBACK" if fields.len() == 7 => {
+            handle_feedback(&fields, scheduler)?;
+            Ok((single("OK FEEDBACK"), false))
+        }
+        "FEEDBACK_BATCH" => {
+            handle_feedback_batch(&fields, scheduler)?;
+            Ok((single("OK FEEDBACK_BATCH"), false))
         }
         "STATS" if fields.len() == 1 => {
             let stats = scheduler.corpus().stats();
             Ok((
-                format!(
+                single(format!(
                     "STATS {} {} {} {}",
                     stats.entries, stats.bytes, stats.max_entries, stats.max_bytes
-                ),
+                )),
                 false,
             ))
         }
-        "QUIT" if fields.len() == 1 => Ok(("BYE".to_string(), true)),
+        "QUIT" if fields.len() == 1 => Ok((single("BYE"), true)),
         _ => Err("invalid command or argument count".to_string()),
     }
+}
+
+fn handle_add_batch(
+    fields: &[&str],
+    scheduler: &mut CorpusScheduler,
+) -> Result<(Vec<String>, bool), String> {
+    if fields.len() < 3 {
+        return Err("ADD_BATCH requires a count".to_string());
+    }
+    let count = parse_batch_count(fields[1])?;
+    if fields.len() != 2 + count * 2 {
+        return Err("ADD_BATCH has an invalid number of fields".to_string());
+    }
+    let mut entries = Vec::with_capacity(count);
+    for item in 0..count {
+        let parent = parse_parent(fields[2 + item * 2])?;
+        let bytes = decode_base64(fields[3 + item * 2])?;
+        let result = scheduler
+            .add_seed(bytes, parent)
+            .map_err(|error| error.to_string())?;
+        entries.push(result.entry);
+    }
+    Ok((batch_response(entries), false))
+}
+
+fn handle_feedback(fields: &[&str], scheduler: &mut CorpusScheduler) -> Result<(), String> {
+    let id: u64 = fields[1]
+        .parse()
+        .map_err(|_| "invalid input id".to_string())?;
+    let energy: u32 = fields[2]
+        .parse()
+        .map_err(|_| "invalid energy".to_string())?;
+    let favored = parse_bool(fields[3])?;
+    let new_edges: u32 = fields[4]
+        .parse()
+        .map_err(|_| "invalid new edge count".to_string())?;
+    let interesting = parse_bool(fields[5])?;
+    let bitmap_hash = if fields[6] == "-" {
+        None
+    } else {
+        let hash = decode_base64(fields[6])?;
+        if hash.len() != 32 {
+            return Err("bitmap hash must contain 32 bytes".to_string());
+        }
+        let mut value = [0u8; 32];
+        value.copy_from_slice(&hash);
+        Some(value)
+    };
+    let mut entry = scheduler
+        .corpus()
+        .get(id)
+        .cloned()
+        .ok_or_else(|| "unknown input id".to_string())?;
+    entry.energy = entry.energy.max(energy);
+    entry.favored |= favored;
+    if bitmap_hash.is_some() || new_edges > 0 || interesting {
+        entry.coverage = Some(CoverageDelta {
+            new_edges,
+            bitmap_hash: bitmap_hash.unwrap_or([0; 32]),
+            interesting,
+        });
+    }
+    scheduler
+        .try_promote(entry)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn handle_feedback_batch(
+    fields: &[&str],
+    scheduler: &mut CorpusScheduler,
+) -> Result<(), String> {
+    if fields.len() < 3 {
+        return Err("FEEDBACK_BATCH requires a count".to_string());
+    }
+    let count = parse_batch_count(fields[1])?;
+    if fields.len() != 2 + count * 6 {
+        return Err("FEEDBACK_BATCH has an invalid number of fields".to_string());
+    }
+    for item in 0..count {
+        let start = 2 + item * 6;
+        let feedback_fields = [
+            "FEEDBACK",
+            fields[start],
+            fields[start + 1],
+            fields[start + 2],
+            fields[start + 3],
+            fields[start + 4],
+            fields[start + 5],
+        ];
+        handle_feedback(&feedback_fields, scheduler)?;
+    }
+    Ok(())
+}
+
+fn parse_batch_count(value: &str) -> Result<usize, String> {
+    let count: usize = value.parse().map_err(|_| "invalid batch count".to_string())?;
+    if count == 0 || count > MAX_BATCH_SIZE {
+        return Err(format!("batch count must be between 1 and {MAX_BATCH_SIZE}"));
+    }
+    Ok(count)
+}
+
+fn batch_response(entries: Vec<CorpusEntry>) -> Vec<String> {
+    let mut responses = Vec::with_capacity(entries.len() + 2);
+    responses.push(format!("BATCH {}", entries.len()));
+    responses.extend(entries.iter().map(format_entry));
+    responses.push("END BATCH".to_string());
+    responses
+}
+
+fn single(response: impl Into<String>) -> Vec<String> {
+    vec![response.into()]
 }
 
 fn parse_parent(value: &str) -> Result<Option<u64>, String> {
@@ -262,6 +363,9 @@ const BASE64: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn encode_base64(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "~".to_string();
+    }
     let mut output = String::new();
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
@@ -286,7 +390,7 @@ fn encode_base64(bytes: &[u8]) -> String {
 }
 
 fn decode_base64(value: &str) -> Result<Vec<u8>, String> {
-    if value.is_empty() {
+    if value == "~" {
         return Ok(Vec::new());
     }
     let bytes = value.as_bytes();
@@ -351,9 +455,20 @@ mod tests {
     fn protocol_formats_a_hello_and_ping() {
         let mut scheduler = CorpusScheduler::with_default_limits(SchedulerConfig::default());
         assert_eq!(
-            handle_command("HELLO 1", &mut scheduler).unwrap().0,
+            handle_command("HELLO 1", &mut scheduler).unwrap().0[0],
             "HELLO 1 salomon-corpusd"
         );
-        assert_eq!(handle_command("PING", &mut scheduler).unwrap().0, "PONG");
+        assert_eq!(handle_command("PING", &mut scheduler).unwrap().0[0], "PONG");
+    }
+
+    #[test]
+    fn batch_protocol_returns_a_framed_response() {
+        let mut scheduler = CorpusScheduler::with_default_limits(SchedulerConfig::default());
+        let responses = handle_command("ADD_BATCH 2 - YQ== - Yg==", &mut scheduler)
+            .unwrap()
+            .0;
+        assert_eq!(responses.first().map(String::as_str), Some("BATCH 2"));
+        assert_eq!(responses.last().map(String::as_str), Some("END BATCH"));
+        assert_eq!(responses.len(), 4);
     }
 }

@@ -50,6 +50,9 @@ class EngineConfig:
     command: tuple[str, ...] = ()
     extra_args: tuple[str, ...] = ()
     duration_seconds: float = 3_600.0
+    corpus_backend: str = "python"
+    corpus_command: tuple[str, ...] = ()
+    corpus_batch_size: int = 32
 
 
 @dataclass(frozen=True)

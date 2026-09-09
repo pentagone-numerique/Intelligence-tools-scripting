@@ -32,6 +32,18 @@ python3 -m fuzz_orchestrator fuzz --config Salomon.toml --limit 100
 # salomon fuzz --target ./mon_binaire --input ./seeds/
 ```
 
+Le Corpus Manager Rust peut être activé explicitement dans `Salomon.toml` :
+
+```toml
+[engine]
+backend = "builtin"
+corpus_backend = "rust"
+corpus_command = ["salomon-corpusd"]
+corpus_batch_size = 32
+```
+
+Le backend Python reste le fallback si `salomon-corpusd` n'est pas disponible.
+
 ```bash
 python3 -m fuzz_orchestrator init fuzz.toml --kind binary
 # Modifier target.command pour pointer vers le programme à tester.
