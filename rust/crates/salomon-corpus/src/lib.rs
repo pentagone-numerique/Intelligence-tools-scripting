@@ -237,15 +237,23 @@ impl CorpusManager {
 
     fn allocate_id(&mut self, requested: u64) -> u64 {
         if requested != 0 && !self.entries.contains_key(&requested) {
-            self.next_id = self.next_id.max(requested.saturating_add(1));
+            self.next_id = if requested == u64::MAX {
+                1
+            } else {
+                self.next_id.max(requested + 1)
+            };
             requested
         } else {
-            while self.next_id == 0 || self.entries.contains_key(&self.next_id) {
-                self.next_id = self.next_id.saturating_add(1);
+            loop {
+                if self.next_id == 0 {
+                    self.next_id = 1;
+                }
+                let candidate = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1);
+                if !self.entries.contains_key(&candidate) {
+                    return candidate;
+                }
             }
-            let id = self.next_id;
-            self.next_id = self.next_id.saturating_add(1);
-            id
         }
     }
 
@@ -541,6 +549,25 @@ mod tests {
             corpus.add(vec![4], None),
             Err(CorpusError::EntryLimit { .. })
         ));
+    }
+
+    #[test]
+    fn imported_max_id_does_not_break_future_allocations() {
+        let mut corpus = CorpusManager::new(limits());
+        let imported = CorpusEntry {
+            input: Input {
+                id: u64::MAX,
+                bytes: b"max-id".to_vec(),
+                parent_id: None,
+            },
+            coverage: None,
+            energy: 1,
+            favored: false,
+        };
+        let first = corpus.promote(imported).unwrap();
+        let second = corpus.add(b"n".to_vec(), None).unwrap();
+        assert_eq!(first.entry.input.id, u64::MAX);
+        assert_ne!(second.entry.input.id, u64::MAX);
     }
 
     #[test]
