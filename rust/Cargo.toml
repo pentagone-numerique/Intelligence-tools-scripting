@@ -1,8 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/salomon-core"]
+members = [
+    "crates/salomon-core",
+    "crates/salomon-corpus",
+]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
+version = "0.2.0"

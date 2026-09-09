@@ -50,8 +50,9 @@ fuzz-orchestrator run fuzz.toml --limit 100
 Un exemple de cible locale est disponible dans `examples/targets/demo_binary.py`.
 
 Le socle de migration SALOMON est documenté dans `docs/architecture.md`, avec
-les contrats Rust dans `rust/crates/salomon-core` et le protocole de contrôle
-futur dans `proto/salomon.proto`.
+les contrats Rust dans `rust/crates/salomon-core`, le Corpus Manager/Scheduler
+natif dans `rust/crates/salomon-corpus` et le protocole de contrôle futur dans
+`proto/salomon.proto`.
 
 ## Configuration TOML
 

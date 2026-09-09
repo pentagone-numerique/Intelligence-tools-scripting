@@ -37,7 +37,9 @@ Les concepts partagés sont :
 - `BugReport` ;
 - `CampaignStats`.
 
-Le squelette Rust est dans `rust/crates/salomon-core`. Le protocole de contrôle
+Les contrats Rust sont dans `rust/crates/salomon-core`. Le premier Corpus
+Manager/Scheduler natif est dans `rust/crates/salomon-corpus`; il reste
+optionnel tant que la frontière FFI n'est pas figée. Le protocole de contrôle
 pour la future distribution est dans `proto/salomon.proto`.
 
 Le protocole gRPC ne doit pas transporter chaque cas dans le hot path. Un worker

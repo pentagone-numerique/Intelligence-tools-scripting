@@ -197,14 +197,6 @@ class ArtifactStore:
         }
         _write_json(self.run_dir / "manifest.json", manifest)
 
-    def write_manifest(self, corpus_count: int) -> None:
-        manifest = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "corpus_count": corpus_count,
-            "config": config_to_dict(self.config),
-        }
-        _write_json(self.run_dir / "manifest.json", manifest)
-
     def record(self, result: ExecutionResult, payload: bytes) -> None:
         digest = hashlib.sha256(payload).hexdigest()
         record = {

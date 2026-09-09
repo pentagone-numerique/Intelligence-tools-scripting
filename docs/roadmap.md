@@ -11,9 +11,10 @@
 
 ## Phase 2 — Performance locale
 
-- [ ] Corpus Manager Rust
-- [ ] scheduler fast/rare/weighted
-- [ ] index de couverture natif
+- [x] Corpus Manager Rust borné et dédoublonné
+- [x] scheduler random/feedback pondéré et reproductible
+- [x] index de couverture natif sur bitmap 65 536 octets
+- [ ] frontière FFI/IPC avec le moteur Python
 - [ ] forkserver POSIX
 - [ ] import/export AFL++ queue
 
