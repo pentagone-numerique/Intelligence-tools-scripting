@@ -5,10 +5,14 @@ import random
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from fuzz_orchestrator.config import ConfigError, load_config
+from fuzz_orchestrator.dashboard import create_server
 from fuzz_orchestrator.engine import FuzzEngine
 from fuzz_orchestrator.external import ExternalFuzzEngine
 from fuzz_orchestrator.minimize import minimize_payload
@@ -228,6 +232,46 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(result.original.status, "nonzero_exit")
             self.assertEqual(result.minimized.status, "nonzero_exit")
             self.assertLess(len(result.payload), 16)
+
+
+class DashboardTests(unittest.TestCase):
+    def test_dashboard_serves_summary_results_and_blocks_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            run_dir = Path(directory_name)
+            findings = run_dir / "findings"
+            findings.mkdir()
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"config": {"name": "dashboard-test", "engine": {"type": "builtin"}}}),
+                encoding="utf-8",
+            )
+            (run_dir / "summary.json").write_text(
+                json.dumps({"executed": 1, "findings": 1, "statuses": {"crash": 1}}),
+                encoding="utf-8",
+            )
+            (run_dir / "results.jsonl").write_text(
+                json.dumps({"case_id": "00000001", "status": "crash", "input_size": 3, "metadata": {}}) + "\n",
+                encoding="utf-8",
+            )
+            (findings / "case-00000001.bin").write_bytes(b"abc")
+            server = create_server(run_dir, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with urllib.request.urlopen(base + "/api/summary") as response:
+                    summary = json.loads(response.read())
+                self.assertEqual(summary["summary"]["findings"], 1)
+                with urllib.request.urlopen(base + "/api/results") as response:
+                    results = json.loads(response.read())
+                self.assertTrue(results["results"][0]["artifact_urls"])
+                with urllib.request.urlopen(base + "/artifact/findings/case-00000001.bin") as response:
+                    self.assertEqual(response.read(), b"abc")
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(base + "/artifact/../summary.json")
+                self.assertEqual(error.exception.code, 404)
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":

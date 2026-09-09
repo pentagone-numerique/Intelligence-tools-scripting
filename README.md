@@ -213,6 +213,24 @@ Statuts principaux :
 
 Le CLI retourne `0` sans finding, `1` si la campagne a trouvé un cas non-OK, et `2` pour une configuration invalide.
 
+## Dashboard local
+
+Après une campagne, lancer le tableau de bord sans dépendance externe :
+
+```bash
+python3 -m fuzz_orchestrator dashboard artifacts/parser-local-20260909T120000Z
+```
+
+Il affiche les compteurs, les statuts, les comportements nouveaux, l’activité récente, les findings et les liens vers les artefacts. La page se rafraîchit automatiquement toutes les cinq secondes et peut aussi suivre un run encore en cours.
+
+Le serveur écoute uniquement sur `127.0.0.1` par défaut. Pour un accès depuis un réseau de laboratoire explicitement maîtrisé :
+
+```bash
+python3 -m fuzz_orchestrator dashboard artifacts/<run> --host 0.0.0.0 --port 8765
+```
+
+L’interface ne sert que les fichiers du dossier du run, bloque les chemins traversant (`..`) et refuse les artefacts de plus de 64 MiB.
+
 ## Tests
 
 ```bash

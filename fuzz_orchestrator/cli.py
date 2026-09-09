@@ -12,6 +12,7 @@ from typing import Sequence
 
 from . import __version__
 from .config import ConfigError, config_to_dict, load_config
+from .dashboard import serve as serve_dashboard
 from .engine import CorpusError, FuzzEngine
 from .external import ExternalFuzzEngine
 from .minimize import minimize_payload, replay_payload
@@ -151,6 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
     minimize.add_argument("input", help="fichier .bin à réduire")
     minimize.add_argument("--output", help="fichier de sortie (par défaut: <input>.min.bin)")
     minimize.add_argument("--max-attempts", type=int, default=500, help="nombre maximal de tentatives")
+
+    dashboard = subparsers.add_parser("dashboard", help="servir le tableau de bord d'un run")
+    dashboard.add_argument("run_dir", help="dossier de run contenant summary.json/manifest.json")
+    dashboard.add_argument("--host", default="127.0.0.1", help="adresse d'écoute (localhost par défaut)")
+    dashboard.add_argument("--port", type=int, default=8765, help="port HTTP (8765 par défaut, 0 = automatique)")
     return parser
 
 
@@ -277,6 +283,13 @@ def _minimize(args: argparse.Namespace) -> int:
     return 1 if result.minimized.is_finding else 0
 
 
+def _dashboard(args: argparse.Namespace) -> int:
+    if args.port < 0 or args.port > 65_535:
+        raise ConfigError("--port doit être compris entre 0 et 65535")
+    serve_dashboard(args.run_dir, host=args.host, port=args.port)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -291,6 +304,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _replay(args)
         if args.command == "minimize":
             return _minimize(args)
+        if args.command == "dashboard":
+            return _dashboard(args)
         parser.error("commande inconnue")
     except (ConfigError, CorpusError, OSError, ValueError) as exc:
         print(f"Erreur: {exc}", file=sys.stderr)
