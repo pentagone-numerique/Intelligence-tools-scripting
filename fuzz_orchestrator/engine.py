@@ -219,6 +219,7 @@ class FuzzEngine:
     def plan(self) -> dict[str, Any]:
         return {
             "name": self.config.name,
+            "engine_type": "builtin",
             "iterations": self.config.iterations,
             "workers": self.config.workers,
             "corpus_count": len(self.corpus),

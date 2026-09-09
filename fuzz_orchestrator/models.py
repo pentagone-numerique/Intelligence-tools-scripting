@@ -36,6 +36,23 @@ class MutationConfig:
 
 
 @dataclass(frozen=True)
+class EngineConfig:
+    """Campaign engine selection.
+
+    ``builtin`` uses the Python mutation engine.  ``aflpp``, ``libfuzzer`` and
+    ``command`` delegate generation to an installed external engine while the
+    orchestrator still prepares the corpus, bounds the process and collects
+    artifacts.
+    """
+
+    type: str = "builtin"
+    executable: str = ""
+    command: tuple[str, ...] = ()
+    extra_args: tuple[str, ...] = ()
+    duration_seconds: float = 3_600.0
+
+
+@dataclass(frozen=True)
 class BinaryTargetConfig:
     type: str
     command: tuple[str, ...]
@@ -102,6 +119,7 @@ class RunConfig:
     mutations: MutationConfig = field(default_factory=MutationConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     scheduler: str = "random"
+    engine: EngineConfig = field(default_factory=EngineConfig)
 
 
 @dataclass

@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from .models import (
     BinaryTargetConfig,
+    EngineConfig,
     HttpTargetConfig,
     MutationConfig,
     RunConfig,
@@ -45,6 +46,7 @@ _ALLOWED_OPERATIONS = {
 }
 _ALLOWED_INPUT_MODES = {"stdin", "file", "argv"}
 _ALLOWED_HTTP_LOCATIONS = {"body", "query", "header"}
+_ALLOWED_ENGINES = {"builtin", "aflpp", "libfuzzer", "command"}
 _MAX_ITERATIONS = 1_000_000
 _MAX_WORKERS = 64
 _MAX_INPUT_SIZE = 16 * 1024 * 1024
@@ -415,6 +417,42 @@ def _parse_http_target(raw: Mapping[str, Any], safety: SafetyConfig) -> HttpTarg
     )
 
 
+def _parse_engine(raw: Mapping[str, Any]) -> EngineConfig:
+    engine_type = _string(raw.get("type", "builtin"), "engine.type").lower()
+    if engine_type not in _ALLOWED_ENGINES:
+        raise ConfigError(
+            "engine.type must be one of: builtin, aflpp, libfuzzer, command"
+        )
+    executable_value = raw.get("executable", "")
+    if not isinstance(executable_value, str):
+        raise ConfigError("engine.executable must be a string")
+    extra_args = tuple(_string_list(raw.get("extra_args", []), "engine.extra_args"))
+    command_value = raw.get("command", [])
+    command = tuple(_string_list(command_value, "engine.command"))
+    if any("\x00" in value for value in (*extra_args, *command, executable_value)):
+        raise ConfigError("engine arguments cannot contain NUL characters")
+    duration_seconds = _float(
+        raw.get("duration_seconds", 3_600.0),
+        "engine.duration_seconds",
+        minimum=1.0,
+        maximum=86_400.0,
+    )
+    if engine_type == "command":
+        if not command:
+            raise ConfigError("engine.command is required when engine.type = command")
+        if not any("{corpus}" in item for item in command):
+            raise ConfigError("engine.command must contain the {corpus} placeholder")
+        if not any("{output}" in item for item in command):
+            raise ConfigError("engine.command must contain the {output} placeholder")
+    return EngineConfig(
+        type=engine_type,
+        executable=executable_value,
+        command=command,
+        extra_args=extra_args,
+        duration_seconds=duration_seconds,
+    )
+
+
 def load_config(path: str | Path) -> RunConfig:
     """Load and validate a TOML or JSON run configuration."""
 
@@ -427,6 +465,7 @@ def load_config(path: str | Path) -> RunConfig:
     mutations_raw = _section(raw, "mutations")
     safety_raw = _section(raw, "safety")
     target_raw = _section(raw, "target")
+    engine_raw = _section(raw, "engine")
 
     name = _string(run.get("name", config_path.stem), "run.name")
     iterations = _int(run.get("iterations", 100), "run.iterations", minimum=1, maximum=_MAX_ITERATIONS)
@@ -464,6 +503,7 @@ def load_config(path: str | Path) -> RunConfig:
 
     safety = _parse_safety(safety_raw)
     mutations = _parse_mutations(mutations_raw, base_dir)
+    engine = _parse_engine(engine_raw)
     target_type = _string(target_raw.get("type"), "target.type").lower()
     if target_type == "binary":
         target = _parse_binary_target(target_raw, base_dir)
@@ -476,6 +516,8 @@ def load_config(path: str | Path) -> RunConfig:
     else:
         # Keep the message stable and helpful for typos.
         raise ConfigError("target.type must be one of: binary, tcp, udp, http")
+    if engine.type != "builtin" and not isinstance(target, BinaryTargetConfig):
+        raise ConfigError("external engines currently require target.type = binary")
 
     return RunConfig(
         name=name,
@@ -493,6 +535,7 @@ def load_config(path: str | Path) -> RunConfig:
         mutations=mutations,
         safety=safety,
         scheduler=scheduler,
+        engine=engine,
     )
 
 
@@ -516,6 +559,7 @@ def config_to_dict(config: RunConfig) -> dict[str, Any]:
     target = {key: value for key, value in target.items() if value is not None}
     mutation = asdict(config.mutations)
     mutation["dictionary"] = [base64.b64encode(item).decode("ascii") for item in config.mutations.dictionary]
+    engine = asdict(config.engine)
     return {
         "name": config.name,
         "iterations": config.iterations,
@@ -532,4 +576,5 @@ def config_to_dict(config: RunConfig) -> dict[str, Any]:
         "target": target,
         "mutations": mutation,
         "safety": asdict(config.safety),
+        "engine": engine,
     }

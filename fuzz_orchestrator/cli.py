@@ -13,6 +13,7 @@ from typing import Sequence
 from . import __version__
 from .config import ConfigError, config_to_dict, load_config
 from .engine import CorpusError, FuzzEngine
+from .external import ExternalFuzzEngine
 from .minimize import minimize_payload, replay_payload
 from .models import ExecutionResult
 
@@ -41,6 +42,9 @@ inline = ["hello"]
 operations = ["bitflip", "byteflip", "arith8", "insert", "delete", "duplicate", "dictionary"]
 max_operations = 8
 dictionary = ["\\r\\n", "{}", "null"]
+
+[engine]
+type = "builtin" # builtin, aflpp, libfuzzer or command
 
 # Network access is disabled by default. Keep it disabled for binary targets.
 [safety]
@@ -180,7 +184,9 @@ def _load_engine(config_path: str, args: argparse.Namespace) -> FuzzEngine:
         config = replace(config, seed=args.seed)
     if getattr(args, "output_dir", None) is not None:
         config = replace(config, output_dir=Path(args.output_dir).expanduser().resolve())
-    return FuzzEngine(config)
+    if config.engine.type == "builtin":
+        return FuzzEngine(config)
+    return ExternalFuzzEngine(config)
 
 
 def _validate(args: argparse.Namespace) -> int:
@@ -205,7 +211,11 @@ def _run(args: argparse.Namespace) -> int:
     summary = engine.run(limit=args.limit, on_finding=on_finding)
     print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
     if args.verbose and summary.findings:
-        print(f"Findings enregistrés dans: {summary.run_dir / 'findings'}")
+        if getattr(summary, "engine_type", "builtin") == "builtin":
+            findings_path = summary.run_dir / "findings"
+        else:
+            findings_path = summary.run_dir / "engine-output"
+        print(f"Findings enregistrés dans: {findings_path}")
     return 0 if summary.findings == 0 else 1
 
 
@@ -229,6 +239,8 @@ def _replay(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser().resolve()
     payload = input_path.read_bytes()
     engine = _load_engine(args.config, args)
+    if not isinstance(engine, FuzzEngine):
+        raise ConfigError("replay nécessite engine.type = builtin")
     result = replay_payload(engine, payload, args.case_id)
     print(json.dumps(_result_to_dict(result), indent=2, ensure_ascii=False))
     return 1 if result.is_finding else 0
@@ -240,6 +252,8 @@ def _minimize(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser().resolve()
     payload = input_path.read_bytes()
     engine = _load_engine(args.config, args)
+    if not isinstance(engine, FuzzEngine):
+        raise ConfigError("minimize nécessite engine.type = builtin")
     result = minimize_payload(engine, payload, max_attempts=args.max_attempts)
     output_path = (
         Path(args.output).expanduser().resolve()

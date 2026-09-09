@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fuzz_orchestrator.config import ConfigError, load_config
 from fuzz_orchestrator.engine import FuzzEngine
+from fuzz_orchestrator.external import ExternalFuzzEngine
 from fuzz_orchestrator.minimize import minimize_payload
 from fuzz_orchestrator.models import BinaryTargetConfig, MutationConfig
 from fuzz_orchestrator.mutations import Mutator
@@ -104,6 +105,29 @@ class ConfigTests(unittest.TestCase):
             )
             config = load_config(path)
             self.assertEqual(config.target.frames, ("HELLO\n", "{input}", "QUIT\n"))
+
+    def test_aflpp_engine_builds_the_at_at_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            path = self._write(
+                directory,
+                """
+                [corpus]
+                inline = ["seed"]
+                [engine]
+                type = "aflpp"
+                executable = "afl-fuzz"
+                duration_seconds = 10
+                [target]
+                type = "binary"
+                command = ["./target", "{input}"]
+                input_mode = "file"
+                """,
+            )
+            engine = ExternalFuzzEngine(load_config(path))
+            plan = engine.plan()
+            self.assertEqual(plan["engine_type"], "aflpp")
+            self.assertIn("@@", plan["engine_command"])
 
 
 class TargetTests(unittest.TestCase):

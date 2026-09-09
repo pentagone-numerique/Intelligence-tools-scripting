@@ -7,7 +7,8 @@ Un orchestrateur de fuzzing extensible, écrit en Python 3.11 et sans dépendanc
 - un service UDP ;
 - une URL HTTP/HTTPS avec l’entrée dans le corps, la query string ou un header ;
 - des échanges TCP/UDP multi-trames pour les protocoles avec état ;
-- replay et minimisation automatique des findings.
+- replay et minimisation automatique des findings ;
+- délégation optionnelle à AFL++, libFuzzer ou une commande de fuzzing externe.
 
 Le projet est volontairement **safety-first** : les cibles réseau sont désactivées par défaut, exigent une allow-list explicite, les commandes binaires ne passent jamais par un shell, et les entrées/sorties sont plafonnées.
 
@@ -60,6 +61,9 @@ operations = ["bitflip", "byteflip", "arith8", "insert", "delete", "duplicate", 
 max_operations = 8
 dictionary = ["\r\n", "{}", "null"]
 
+[engine]
+type = "builtin"
+
 [target]
 type = "binary"
 command = ["python3", "examples/targets/demo_binary.py"]
@@ -85,6 +89,41 @@ input_mode = "file"
 ```
 
 Le placeholder `{input}` est remplacé par un chemin temporaire différent à chaque cas. Pour une entrée texte en argument, utiliser `input_mode = "argv"`. Les commandes sont des tableaux d’arguments, jamais des chaînes shell.
+
+### Moteurs externes et vraie couverture
+
+Pour déléguer la génération et l’instrumentation à un moteur installé localement, remplacer le moteur intégré :
+
+```toml
+[engine]
+type = "aflpp"
+executable = "afl-fuzz"
+duration_seconds = 300
+extra_args = []
+
+[target]
+type = "binary"
+command = ["./mon-parser", "{input}"]
+input_mode = "file"
+```
+
+L’adaptateur AFL++ prépare un corpus borné, remplace `{input}` par `@@`, lance `afl-fuzz` sans shell et récupère `crashes/` et `hangs/` dans le dossier de run. La cible doit être compilée avec une instrumentation AFL++ compatible.
+
+Pour libFuzzer :
+
+```toml
+[engine]
+type = "libfuzzer"
+duration_seconds = 300
+extra_args = ["-detect_leaks=1"]
+
+[target]
+type = "binary"
+command = ["./mon-harness-libfuzzer"]
+input_mode = "stdin"
+```
+
+Un moteur personnalisé peut utiliser `type = "command"` avec les placeholders `{corpus}`, `{output}` et `{duration}`. Ces moteurs externes contrôlent leur propre couverture ; `replay` et `minimize` restent réservés au moteur intégré. `--limit` est remplacé par `engine.duration_seconds`.
 
 ### Cibles réseau
 
@@ -123,6 +162,8 @@ headers = { Content-Type = "application/octet-stream" }
 ```
 
 Les redirections HTTP ne sont pas suivies et les proxies d’environnement sont désactivés. Il faut donc autoriser explicitement la destination voulue avant de lancer la campagne.
+
+Pour les moteurs externes, le dossier de run contient également `corpus/`, `engine-output/`, `engine.stdout` et `engine.stderr`. Les crashes AFL++/libFuzzer sont comptés à partir des artefacts écrits dans `engine-output`.
 
 ## Rejouer et minimiser un finding
 
