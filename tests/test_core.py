@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import sqlite3
 import sys
 import tempfile
 import textwrap
@@ -202,7 +203,9 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(summary.findings, 3)
             self.assertEqual(summary.statuses, {"nonzero_exit": 3})
             self.assertEqual(summary.novel_behaviors, 1)
+            self.assertEqual(summary.unique_findings, 1)
             self.assertTrue((summary.run_dir / "summary.json").exists())
+            self.assertTrue((summary.run_dir / "results.sqlite3").exists())
             self.assertEqual(len(list((summary.run_dir / "findings").glob("*.bin"))), 3)
 
     def test_minimizer_preserves_finding_status(self) -> None:
@@ -252,6 +255,15 @@ class DashboardTests(unittest.TestCase):
                 json.dumps({"case_id": "00000001", "status": "crash", "input_size": 3, "metadata": {}}) + "\n",
                 encoding="utf-8",
             )
+            database = sqlite3.connect(run_dir / "results.sqlite3")
+            database.execute(
+                "CREATE TABLE results (sequence INTEGER PRIMARY KEY, case_id TEXT, status TEXT, duration_ms REAL, input_size INTEGER, input_sha256 TEXT, returncode INTEGER, response_status INTEGER, metadata TEXT)"
+            )
+            database.execute(
+                "INSERT INTO results VALUES (1, '00000001', 'crash', 1.2, 3, 'abc', 3, NULL, '{}')"
+            )
+            database.commit()
+            database.close()
             (findings / "case-00000001.bin").write_bytes(b"abc")
             server = create_server(run_dir, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)

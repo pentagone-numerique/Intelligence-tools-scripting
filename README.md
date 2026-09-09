@@ -8,7 +8,8 @@ Un orchestrateur de fuzzing extensible, écrit en Python 3.11 et sans dépendanc
 - une URL HTTP/HTTPS avec l’entrée dans le corps, la query string ou un header ;
 - des échanges TCP/UDP multi-trames pour les protocoles avec état ;
 - replay et minimisation automatique des findings ;
-- délégation optionnelle à AFL++, libFuzzer ou une commande de fuzzing externe.
+- délégation optionnelle à AFL++, libFuzzer ou une commande de fuzzing externe ;
+- pacing réseau, déduplication des findings et index SQLite pour les campagnes longues.
 
 Le projet est volontairement **safety-first** : les cibles réseau sont désactivées par défaut, exigent une allow-list explicite, les commandes binaires ne passent jamais par un shell, et les entrées/sorties sont plafonnées.
 
@@ -51,6 +52,8 @@ output_dir = "artifacts"
 save_all_inputs = false
 stop_on_finding = false
 scheduler = "feedback" # random ou feedback
+# Réseau uniquement : limite globale partagée entre les workers.
+# max_requests_per_second = 10
 
 [corpus]
 paths = ["seeds"]
@@ -191,7 +194,8 @@ Chaque exécution crée un dossier horodaté sous `run.output_dir` :
 ```text
 artifacts/parser-local-20260909T120000Z/
 ├── manifest.json       # configuration et nombre de seeds
-├── results.jsonl       # un résultat borné par cas
+├── results.jsonl       # format portable, un résultat par cas
+├── results.sqlite3     # index local pour le dashboard
 ├── summary.json
 └── findings/
     ├── case-00000042.bin
@@ -200,7 +204,7 @@ artifacts/parser-local-20260909T120000Z/
     └── case-00000042.stderr
 ```
 
-Les entrées ne sont conservées que pour les findings, sauf si `save_all_inputs = true`. Chaque finding contient le seed reproduisible (`case_seed`), l’index du corpus, le SHA-256 de l’entrée et les sorties capturées.
+Les entrées ne sont conservées que pour les findings, sauf si `save_all_inputs = true`. Chaque finding contient le seed reproduisible (`case_seed`), l’index du corpus, le SHA-256 de l’entrée et les sorties capturées. Les findings sont aussi marqués comme uniques ou dupliqués selon leur signature observable.
 
 Statuts principaux :
 

@@ -34,6 +34,8 @@ output_dir = "artifacts"
 save_all_inputs = false
 stop_on_finding = false
 scheduler = "random" # or "feedback" to retain novel observable behaviors
+# Network targets only: global request pacing across workers.
+# max_requests_per_second = 10
 
 [corpus]
 paths = ["seeds"]

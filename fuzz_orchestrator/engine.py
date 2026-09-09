@@ -6,7 +6,9 @@ import hashlib
 import json
 import random
 import re
+import sqlite3
 import threading
+import time
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -89,6 +91,25 @@ def _feedback_signature(result: ExecutionResult) -> str:
     return digest.hexdigest()
 
 
+class RateLimiter:
+    """Global pacing for network targets, shared by all worker threads."""
+
+    def __init__(self, requests_per_second: float):
+        self.interval = 1.0 / requests_per_second
+        self._next_slot = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> float:
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_slot)
+            delay = slot - now
+            self._next_slot = slot + self.interval
+        if delay > 0:
+            time.sleep(delay)
+        return delay
+
+
 @dataclass
 class RunSummary:
     requested: int
@@ -98,6 +119,7 @@ class RunSummary:
     run_dir: Path
     stopped_early: bool = False
     novel_behaviors: int = 0
+    unique_findings: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +129,7 @@ class RunSummary:
             "statuses": self.statuses,
             "run_dir": str(self.run_dir),
             "novel_behaviors": self.novel_behaviors,
+            "unique_findings": self.unique_findings,
             "stopped_early": self.stopped_early,
         }
 
@@ -126,6 +149,45 @@ class ArtifactStore:
         if config.save_all_inputs:
             self.cases_dir.mkdir(exist_ok=True)
         self._results_handle = self.results_file.open("w", encoding="utf-8")
+        self.results_db = run_dir / "results.sqlite3"
+        self._db: sqlite3.Connection | None = None
+        self._db_sequence = 0
+        try:
+            self._db = sqlite3.connect(str(self.results_db))
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=NORMAL")
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS results (
+                    sequence INTEGER PRIMARY KEY,
+                    case_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    duration_ms REAL NOT NULL,
+                    input_size INTEGER NOT NULL,
+                    input_sha256 TEXT NOT NULL,
+                    returncode INTEGER,
+                    response_status INTEGER,
+                    metadata TEXT NOT NULL
+                )
+                """
+            )
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_results_status ON results(status)")
+            self._db.commit()
+            row = self._db.execute("SELECT COALESCE(MAX(sequence), 0) FROM results").fetchone()
+            self._db_sequence = int(row[0]) if row else 0
+        except sqlite3.Error:
+            if self._db is not None:
+                self._db.close()
+            self._db = None
+
+    def write_manifest(self, corpus_count: int) -> None:
+        manifest = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "corpus_count": corpus_count,
+            "results_index": self.results_db.name,
+            "config": config_to_dict(self.config),
+        }
+        _write_json(self.run_dir / "manifest.json", manifest)
 
     def write_manifest(self, corpus_count: int) -> None:
         manifest = {
@@ -150,6 +212,32 @@ class ArtifactStore:
         with self._lock:
             self._results_handle.write(json.dumps(record, sort_keys=True) + "\n")
             self._results_handle.flush()
+            if self._db is not None:
+                try:
+                    self._db_sequence += 1
+                    self._db.execute(
+                        """
+                        INSERT INTO results
+                        (sequence, case_id, status, duration_ms, input_size,
+                         input_sha256, returncode, response_status, metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._db_sequence,
+                            result.case_id,
+                            result.status,
+                            result.duration_ms,
+                            result.input_size,
+                            digest,
+                            result.returncode,
+                            result.response_status,
+                            json.dumps(result.metadata, sort_keys=True),
+                        ),
+                    )
+                    self._db.commit()
+                except (sqlite3.Error, TypeError, ValueError):
+                    self._db.close()
+                    self._db = None
             if self.config.save_all_inputs or result.is_finding:
                 directory = self.findings_dir if result.is_finding else self.cases_dir
                 self._write_case(directory, result, payload, digest)
@@ -157,6 +245,13 @@ class ArtifactStore:
     def close(self) -> None:
         with self._lock:
             self._results_handle.close()
+            if self._db is not None:
+                try:
+                    self._db.commit()
+                    self._db.close()
+                except sqlite3.Error:
+                    pass
+                self._db = None
 
     def _write_case(
         self,
@@ -215,6 +310,12 @@ class FuzzEngine:
         self._adaptive_hashes = {hashlib.sha256(seed).digest() for seed in self.corpus}
         self._adaptive_bytes = sum(len(seed) for seed in self.corpus)
         self._adaptive_lock = threading.Lock()
+        is_network = self.config.target.type in {"tcp", "udp", "http"}
+        self._rate_limiter = (
+            RateLimiter(self.config.max_requests_per_second)
+            if is_network and self.config.max_requests_per_second is not None
+            else None
+        )
 
     def plan(self) -> dict[str, Any]:
         return {
@@ -229,6 +330,7 @@ class FuzzEngine:
             "max_input_size": self.config.max_input_size,
             "network_enabled": self.config.safety.allow_network,
             "scheduler": self.config.scheduler,
+            "max_requests_per_second": self.config.max_requests_per_second,
             "operations": list(self.config.mutations.operations),
         }
 
@@ -246,9 +348,11 @@ class FuzzEngine:
         store.write_manifest(len(self.corpus))
         statuses: Counter[str] = Counter()
         feedback_seen: set[str] = set()
+        finding_signatures: set[str] = set()
         findings = 0
         executed = 0
         novel_behaviors = 0
+        unique_findings = 0
         stopped_early = False
 
         pending: dict[Future[tuple[ExecutionResult, bytes]], int] = {}
@@ -293,6 +397,11 @@ class FuzzEngine:
                                         self._adaptive_bytes += len(payload)
                                         adaptive_seed_added = True
                         result.metadata["adaptive_seed_added"] = adaptive_seed_added
+                        is_unique_finding = result.is_finding and signature not in finding_signatures
+                        if is_unique_finding:
+                            finding_signatures.add(signature)
+                            unique_findings += 1
+                        result.metadata["unique_finding"] = is_unique_finding
                         store.record(result, payload)
                         statuses[result.status] += 1
                         executed += 1
@@ -322,6 +431,7 @@ class FuzzEngine:
             statuses=dict(sorted(statuses.items())),
             run_dir=run_dir,
             novel_behaviors=novel_behaviors,
+            unique_findings=unique_findings,
             stopped_early=stopped_early,
         )
         _write_json(run_dir / "summary.json", summary.as_dict())
@@ -338,6 +448,9 @@ class FuzzEngine:
             corpus = self.corpus
         corpus_index = rng.randrange(len(corpus))
         payload = self.mutator.mutate(corpus[corpus_index], rng, corpus)
+        rate_delay_ms = 0.0
+        if self._rate_limiter is not None:
+            rate_delay_ms = round(self._rate_limiter.wait() * 1000.0, 3)
         try:
             result = self.target.execute(payload, case_id)
         except Exception as exc:  # target plug-ins should not abort the campaign
@@ -354,5 +467,6 @@ class FuzzEngine:
             "case_seed": case_seed,
             "corpus_index": corpus_index,
             "scheduler_corpus_size": len(corpus),
+            "rate_limit_delay_ms": rate_delay_ms,
         }
         return result, payload

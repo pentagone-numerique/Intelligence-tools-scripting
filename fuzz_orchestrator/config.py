@@ -488,6 +488,17 @@ def load_config(path: str | Path) -> RunConfig:
     scheduler = _string(run.get("scheduler", "random"), "run.scheduler").lower()
     if scheduler not in {"random", "feedback"}:
         raise ConfigError("run.scheduler must be either random or feedback")
+    rate_value = run.get("max_requests_per_second")
+    max_requests_per_second = (
+        _float(
+            rate_value,
+            "run.max_requests_per_second",
+            minimum=0.1,
+            maximum=1_000.0,
+        )
+        if rate_value is not None
+        else None
+    )
     output_dir = _resolve_path(base_dir, run.get("output_dir", "artifacts"), "run.output_dir")
 
     corpus_paths = tuple(
@@ -536,6 +547,7 @@ def load_config(path: str | Path) -> RunConfig:
         safety=safety,
         scheduler=scheduler,
         engine=engine,
+        max_requests_per_second=max_requests_per_second,
     )
 
 
@@ -573,6 +585,7 @@ def config_to_dict(config: RunConfig) -> dict[str, Any]:
         "save_all_inputs": config.save_all_inputs,
         "stop_on_finding": config.stop_on_finding,
         "scheduler": config.scheduler,
+        "max_requests_per_second": config.max_requests_per_second,
         "target": target,
         "mutations": mutation,
         "safety": asdict(config.safety),

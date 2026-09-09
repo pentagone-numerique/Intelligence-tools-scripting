@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import sqlite3
 from collections import Counter, deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,7 +34,7 @@ h1 { margin:0 0 5px; font-size:clamp(23px,3vw,36px); letter-spacing:-.03em; }
 h2 { margin:0 0 15px; font-size:17px; }
 .subtitle,.muted { color:var(--muted); }
 #live { color:var(--good); font-weight:700; }
-.grid { display:grid; gap:15px; grid-template-columns:repeat(4,minmax(0,1fr)); margin-bottom:15px; }
+.grid { display:grid; gap:15px; grid-template-columns:repeat(5,minmax(0,1fr)); margin-bottom:15px; }
 .card,.panel { background:rgba(18,26,45,.9); border:1px solid var(--line); border-radius:15px; box-shadow:0 12px 35px rgba(0,0,0,.18); }
 .card { padding:17px 18px; min-height:105px; }
 .card .label { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.12em; }
@@ -60,6 +61,7 @@ button:hover { border-color:var(--accent); }
 .legend { display:flex; gap:15px; color:var(--muted); font-size:12px; margin-top:9px; flex-wrap:wrap; }
 .legend span::before { content:""; display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; background:var(--accent); }
 .legend .bad::before { background:var(--bad); } .legend .warn::before { background:var(--warn); }
+@media (max-width:1050px) { .grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 @media (max-width:850px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .two { grid-template-columns:1fr; } header { display:block; } .actions { margin-top:15px; } }
 @media (max-width:500px) { main { padding:20px 13px 35px; } .grid { grid-template-columns:1fr 1fr; gap:9px; } .card { padding:13px; } .card .value { font-size:24px; } }
 </style>
@@ -73,6 +75,7 @@ button:hover { border-color:var(--accent); }
 <section class="grid">
   <article class="card"><div class="label">Cas exécutés</div><div class="value" id="executed">—</div></article>
   <article class="card"><div class="label">Findings</div><div class="value" id="findings">—</div></article>
+  <article class="card"><div class="label">Findings uniques</div><div class="value" id="unique">—</div></article>
   <article class="card"><div class="label">Comportements nouveaux</div><div class="value" id="novel">—</div></article>
   <article class="card"><div class="label">Moteur / état</div><div class="value" id="engine" style="font-size:18px">—</div></article>
 </section>
@@ -127,7 +130,7 @@ async function refresh() {
     const overview=await summaryResponse.json(); const results=await resultsResponse.json();
     const summary=overview.summary || {}; const manifest=overview.manifest || {};
     set("run-name", `${manifest.config?.name || summary.engine_type || "campagne"} · ${overview.running ? "en cours" : "terminée"} · mise à jour ${overview.updated_at || "—"}`);
-    set("executed", summary.executed ?? "0"); set("findings", summary.findings ?? "0"); set("novel", summary.novel_behaviors ?? "0"); set("engine", summary.engine_type || manifest.config?.engine?.type || "builtin");
+    set("executed", summary.executed ?? "0"); set("findings", summary.findings ?? "0"); set("unique", summary.unique_findings ?? summary.findings ?? "0"); set("novel", summary.novel_behaviors ?? "0"); set("engine", summary.engine_type || manifest.config?.engine?.type || "builtin");
     renderStatuses(summary.statuses || {}, summary.executed || 0); renderTimeline(results.results || []); renderFindings(results.results || []);
     $("manifest").textContent=JSON.stringify(manifest.config || manifest, null, 2);
     $("live").textContent=overview.running ? "● en cours" : "● terminée"; $("live").style.color=overview.running ? "var(--warn)" : "var(--good)";
@@ -147,7 +150,56 @@ def _json_file(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _indexed_results(
+    run_dir: Path,
+    limit: int,
+    *,
+    findings_only: bool = False,
+) -> list[dict[str, Any]] | None:
+    database = run_dir / "results.sqlite3"
+    if not database.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(str(database))
+        where = "WHERE status != 'ok'" if findings_only else ""
+        rows = connection.execute(
+            f"""
+            SELECT sequence, case_id, status, duration_ms, input_size,
+                   input_sha256, returncode, response_status, metadata
+            FROM results {where}
+            ORDER BY sequence DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        connection.close()
+    except sqlite3.Error:
+        return None
+    values: list[dict[str, Any]] = []
+    for sequence, case_id, status, duration_ms, input_size, digest, returncode, response_status, metadata in reversed(rows):
+        try:
+            decoded_metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError):
+            decoded_metadata = {}
+        values.append(
+            {
+                "sequence": sequence,
+                "case_id": case_id,
+                "status": status,
+                "duration_ms": duration_ms,
+                "input_size": input_size,
+                "input_sha256": digest,
+                "returncode": returncode,
+                "response_status": response_status,
+                "metadata": decoded_metadata if isinstance(decoded_metadata, dict) else {},
+            }
+        )
+    return values
+
+
 def _tail_results(run_dir: Path, limit: int, *, findings_only: bool = False) -> list[dict[str, Any]]:
+    indexed = _indexed_results(run_dir, limit, findings_only=findings_only)
+    if indexed is not None:
+        return indexed
     path = run_dir / "results.jsonl"
     if not path.is_file():
         return []
@@ -186,6 +238,9 @@ def _summary(run_dir: Path) -> tuple[dict[str, Any], bool, str]:
             "statuses": dict(statuses),
             "novel_behaviors": sum(
                 1 for row in rows if row.get("metadata", {}).get("novel_behavior") is True
+            ),
+            "unique_findings": sum(
+                1 for row in rows if row.get("metadata", {}).get("unique_finding") is True
             ),
             "run_dir": str(run_dir),
         }

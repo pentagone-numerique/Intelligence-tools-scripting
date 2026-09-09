@@ -120,6 +120,7 @@ class RunConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     scheduler: str = "random"
     engine: EngineConfig = field(default_factory=EngineConfig)
+    max_requests_per_second: Optional[float] = None
 
 
 @dataclass
