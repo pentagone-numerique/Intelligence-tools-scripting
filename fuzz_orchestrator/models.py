@@ -44,6 +44,7 @@ class BinaryTargetConfig:
     env: Mapping[str, str] = field(default_factory=dict)
     expected_exit_codes: tuple[int, ...] = (0,)
     max_output_bytes: int = 65_536
+    max_memory_mb: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class TcpTargetConfig:
     port: int
     expect_response: bool = False
     response_timeout_is_failure: bool = False
+    frames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,7 @@ class UdpTargetConfig:
     port: int
     expect_response: bool = False
     response_timeout_is_failure: bool = False
+    frames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,7 @@ class RunConfig:
     target: TargetConfig
     mutations: MutationConfig = field(default_factory=MutationConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    scheduler: str = "random"
 
 
 @dataclass

@@ -11,6 +11,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+try:  # resource.prlimit is available on Linux and some other POSIX systems.
+    import resource
+except ImportError:  # pragma: no cover - exercised on Windows only
+    resource = None  # type: ignore[assignment]
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_from_bytes, urlsplit, urlunsplit
@@ -39,6 +44,26 @@ def _now() -> float:
 
 def _duration(start: float) -> float:
     return round((_now() - start) * 1000.0, 3)
+
+
+_MAX_RENDERED_FRAME_BYTES = 32 * 1024 * 1024
+
+
+def _render_frames(frames: tuple[str, ...], payload: bytes) -> tuple[bytes, ...]:
+    if not frames:
+        return (payload,)
+    rendered: list[bytes] = []
+    for template in frames:
+        pieces = template.split("{input}")
+        value = bytearray()
+        for index, piece in enumerate(pieces):
+            value.extend(piece.encode("utf-8"))
+            if index < len(pieces) - 1:
+                value.extend(payload)
+        if len(value) > _MAX_RENDERED_FRAME_BYTES:
+            raise ValueError("rendered network frame exceeds 32 MiB")
+        rendered.append(bytes(value))
+    return tuple(rendered)
 
 
 def _bounded_reader(stream: Any, limit: int, output: bytearray, flags: dict[str, bool]) -> None:
@@ -82,6 +107,21 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
             process.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
             pass
+
+
+def _apply_memory_limit(
+    process: subprocess.Popen[bytes], max_memory_mb: int | None
+) -> tuple[bool | None, str | None]:
+    if max_memory_mb is None:
+        return None, None
+    if resource is None or not hasattr(resource, "prlimit"):
+        return False, "memory limits require a POSIX platform with resource.prlimit"
+    try:
+        limit = max_memory_mb * 1024 * 1024
+        resource.prlimit(process.pid, resource.RLIMIT_AS, (limit, limit))
+    except (AttributeError, OSError, PermissionError, ValueError) as exc:
+        return False, str(exc)
+    return True, None
 
 
 class BinaryTarget:
@@ -149,6 +189,30 @@ class BinaryTarget:
                 metadata={"exception": type(exc).__name__, "command": list(command)},
             )
 
+        memory_limit_applied, memory_limit_error = _apply_memory_limit(
+            process, self.config.max_memory_mb
+        )
+        if memory_limit_error is not None:
+            _terminate_process(process)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+            return ExecutionResult(
+                case_id=case_id,
+                status="error",
+                duration_ms=_duration(start),
+                input_size=input_size,
+                stderr=memory_limit_error.encode("utf-8", errors="replace"),
+                metadata={
+                    "command": list(command),
+                    "memory_limit_mb": self.config.max_memory_mb,
+                    "memory_limit_applied": memory_limit_applied,
+                },
+            )
+
         assert process.stdout is not None
         assert process.stderr is not None
         stdout_thread = threading.Thread(
@@ -204,6 +268,8 @@ class BinaryTarget:
             "input_mode": self.config.input_mode,
             "stdout_truncated": stdout_flags["truncated"],
             "stderr_truncated": stderr_flags["truncated"],
+            "memory_limit_mb": self.config.max_memory_mb,
+            "memory_limit_applied": memory_limit_applied,
         }
         if timed_out:
             status = "timeout"
@@ -275,11 +341,13 @@ class TcpTarget:
     def execute(self, payload: bytes, case_id: str) -> ExecutionResult:
         start = _now()
         try:
+            frames = _render_frames(self.config.frames, payload)
             with socket.create_connection(
                 (self.config.host, self.config.port), timeout=self.timeout_seconds
             ) as sock:
                 sock.settimeout(self.timeout_seconds)
-                sock.sendall(payload)
+                for frame in frames:
+                    sock.sendall(frame)
                 response = b""
                 truncated = False
                 response_timeout = False
@@ -299,6 +367,7 @@ class TcpTarget:
                         "protocol": "tcp",
                         "host": self.config.host,
                         "port": self.config.port,
+                        "frame_count": len(frames),
                         "response_truncated": truncated,
                         "response_timeout": response_timeout,
                     },
@@ -319,10 +388,12 @@ class UdpTarget:
         start = _now()
         family = socket.AF_INET6 if ":" in self.config.host else socket.AF_INET
         try:
+            frames = _render_frames(self.config.frames, payload)
             with socket.socket(family, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(self.timeout_seconds)
                 sock.connect((self.config.host, self.config.port))
-                sock.send(payload)
+                for frame in frames:
+                    sock.send(frame)
                 response = b""
                 response_timeout = False
                 if self.config.expect_response:
@@ -341,6 +412,7 @@ class UdpTarget:
                         "protocol": "udp",
                         "host": self.config.host,
                         "port": self.config.port,
+                        "frame_count": len(frames),
                         "response_truncated": len(response) > self.max_response_bytes,
                         "response_timeout": response_timeout,
                     },

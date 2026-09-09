@@ -5,7 +5,9 @@ Un orchestrateur de fuzzing extensible, écrit en Python 3.11 et sans dépendanc
 - un binaire local via `stdin`, un fichier temporaire ou un argument ;
 - un service TCP ;
 - un service UDP ;
-- une URL HTTP/HTTPS avec l’entrée dans le corps, la query string ou un header.
+- une URL HTTP/HTTPS avec l’entrée dans le corps, la query string ou un header ;
+- des échanges TCP/UDP multi-trames pour les protocoles avec état ;
+- replay et minimisation automatique des findings.
 
 Le projet est volontairement **safety-first** : les cibles réseau sont désactivées par défaut, exigent une allow-list explicite, les commandes binaires ne passent jamais par un shell, et les entrées/sorties sont plafonnées.
 
@@ -47,6 +49,7 @@ seed = 1337
 output_dir = "artifacts"
 save_all_inputs = false
 stop_on_finding = false
+scheduler = "feedback" # random ou feedback
 
 [corpus]
 paths = ["seeds"]
@@ -63,6 +66,8 @@ command = ["python3", "examples/targets/demo_binary.py"]
 input_mode = "stdin"
 expected_exit_codes = [0]
 max_output_bytes = 65536
+# Optionnel, sur Linux avec resource.prlimit : limite d'espace d'adressage (MiB).
+# max_memory_mb = 512
 
 [safety]
 allow_network = false
@@ -96,7 +101,11 @@ host = "127.0.0.1"
 port = 9001
 expect_response = true
 response_timeout_is_failure = false
+# Optionnel : plusieurs trames sur la même connexion TCP.
+frames = ["HELLO\n", "{input}", "QUIT\n"]
 ```
+
+`frames` permet de fuzzer des protocoles avec état : chaque chaîne est encodée en UTF-8 et `{input}` est remplacé par les octets mutés. Le même champ est disponible pour UDP ; au moins une trame doit contenir `{input}`.
 
 Les hôtes doivent correspondre exactement à l’allow-list ou à un CIDR explicitement écrit. Les wildcards ne sont pas acceptés. Pour HTTP :
 
@@ -114,6 +123,25 @@ headers = { Content-Type = "application/octet-stream" }
 ```
 
 Les redirections HTTP ne sont pas suivies et les proxies d’environnement sont désactivés. Il faut donc autoriser explicitement la destination voulue avant de lancer la campagne.
+
+## Rejouer et minimiser un finding
+
+Un finding peut être rejoué sans relancer toute la campagne :
+
+```bash
+python3 -m fuzz_orchestrator replay fuzz.toml artifacts/.../findings/case-00000042.bin
+```
+
+Le réducteur applique un delta-debugging et conserve le statut observable du finding :
+
+```bash
+python3 -m fuzz_orchestrator minimize fuzz.toml artifacts/.../findings/case-00000042.bin \
+  --max-attempts 500
+```
+
+Il produit `case-00000042.min.bin` et un rapport JSON. Les erreurs de transport et les cibles injoignables sont refusées afin d’éviter de créer un faux finding vide.
+
+Chaque résultat contient aussi une signature de **comportement observable** et un marqueur de nouveauté. Ce n’est pas de la couverture de code instrumentée : cela fonctionne également pour TCP/UDP/HTTP et sert à repérer de nouvelles classes de réponses, de statuts ou de sorties. Avec `scheduler = "feedback"`, les entrées qui produisent un comportement nouveau rejoignent le corpus de travail pour les cas suivants. Pour une reproductibilité maximale, utiliser `workers = 1`; avec plusieurs workers, l’ordre d’enrichissement dépend de l’arrivée des réponses. Une intégration AFL++, libFuzzer ou SanitizerCoverage pourra être ajoutée comme backend de feedback dédié.
 
 ## Résultats
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import replace
@@ -12,6 +13,7 @@ from typing import Sequence
 from . import __version__
 from .config import ConfigError, config_to_dict, load_config
 from .engine import CorpusError, FuzzEngine
+from .minimize import minimize_payload, replay_payload
 from .models import ExecutionResult
 
 
@@ -29,6 +31,7 @@ max_input_size = 1048576
 output_dir = "artifacts"
 save_all_inputs = false
 stop_on_finding = false
+scheduler = "random" # or "feedback" to retain novel observable behaviors
 
 [corpus]
 paths = ["seeds"]
@@ -54,6 +57,8 @@ command = ["./path/to/your-target"]
 input_mode = "stdin"
 expected_exit_codes = [0]
 max_output_bytes = 65536
+# Optional Linux/resource.prlimit address-space cap (MiB); omit it to disable.
+# max_memory_mb = 512
 # For a file-based target instead:
 # input_mode = "file"
 # command = ["./path/to/your-target", "{input}"]
@@ -65,6 +70,8 @@ host = "127.0.0.1"
 port = 9001
 expect_response = false
 response_timeout_is_failure = false
+# Optional stateful exchange; {input} is replaced by the fuzzed payload.
+# frames = ["HELLO", "{input}", "QUIT"]
 
 # Before running, explicitly opt in for this host:
 # [safety]
@@ -78,6 +85,8 @@ host = "127.0.0.1"
 port = 9001
 expect_response = false
 response_timeout_is_failure = false
+# Optional stateful exchange; {input} is replaced by the fuzzed payload.
+# frames = ["HELLO", "{input}", "QUIT"]
 
 # Before running, explicitly opt in for this host:
 # [safety]
@@ -127,6 +136,17 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, help="surcharger temporairement run.seed")
     run.add_argument("--output-dir", help="surcharger temporairement run.output_dir")
     run.add_argument("--verbose", action="store_true", help="afficher chaque finding")
+
+    replay = subparsers.add_parser("replay", help="rejouer une entrée sauvegardée")
+    replay.add_argument("config", help="fichier TOML ou JSON")
+    replay.add_argument("input", help="fichier .bin à rejouer")
+    replay.add_argument("--case-id", default="replay", help="identifiant affiché dans le résultat")
+
+    minimize = subparsers.add_parser("minimize", help="réduire un finding en conservant son statut")
+    minimize.add_argument("config", help="fichier TOML ou JSON")
+    minimize.add_argument("input", help="fichier .bin à réduire")
+    minimize.add_argument("--output", help="fichier de sortie (par défaut: <input>.min.bin)")
+    minimize.add_argument("--max-attempts", type=int, default=500, help="nombre maximal de tentatives")
     return parser
 
 
@@ -189,6 +209,60 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if summary.findings == 0 else 1
 
 
+def _result_to_dict(result: ExecutionResult) -> dict[str, object]:
+    return {
+        "case_id": result.case_id,
+        "status": result.status,
+        "duration_ms": result.duration_ms,
+        "input_size": result.input_size,
+        "returncode": result.returncode,
+        "response_status": result.response_status,
+        "stdout_bytes": len(result.stdout),
+        "stderr_bytes": len(result.stderr),
+        "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
+        "metadata": result.metadata,
+    }
+
+
+def _replay(args: argparse.Namespace) -> int:
+    input_path = Path(args.input).expanduser().resolve()
+    payload = input_path.read_bytes()
+    engine = _load_engine(args.config, args)
+    result = replay_payload(engine, payload, args.case_id)
+    print(json.dumps(_result_to_dict(result), indent=2, ensure_ascii=False))
+    return 1 if result.is_finding else 0
+
+
+def _minimize(args: argparse.Namespace) -> int:
+    if args.max_attempts < 1 or args.max_attempts > 10_000:
+        raise ConfigError("--max-attempts doit être compris entre 1 et 10000")
+    input_path = Path(args.input).expanduser().resolve()
+    payload = input_path.read_bytes()
+    engine = _load_engine(args.config, args)
+    result = minimize_payload(engine, payload, max_attempts=args.max_attempts)
+    output_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else input_path.with_name(input_path.stem + ".min" + input_path.suffix)
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(result.payload)
+    report = {
+        "input": str(input_path),
+        "output": str(output_path),
+        "attempts": result.attempts,
+        "original": _result_to_dict(result.original),
+        "minimized": _result_to_dict(result.minimized),
+        "original_size": len(payload),
+        "minimized_size": len(result.payload),
+    }
+    report_path = output_path.with_suffix(output_path.suffix + ".json")
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if result.minimized.is_finding else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -199,6 +273,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _validate(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "replay":
+            return _replay(args)
+        if args.command == "minimize":
+            return _minimize(args)
         parser.error("commande inconnue")
     except (ConfigError, CorpusError, OSError, ValueError) as exc:
         print(f"Erreur: {exc}", file=sys.stderr)

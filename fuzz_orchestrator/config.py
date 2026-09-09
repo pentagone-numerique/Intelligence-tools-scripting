@@ -299,6 +299,12 @@ def _parse_binary_target(raw: Mapping[str, Any], base_dir: Path) -> BinaryTarget
         minimum=1,
         maximum=_MAX_OUTPUT_SIZE,
     )
+    max_memory_value = raw.get("max_memory_mb")
+    max_memory_mb = (
+        _int(max_memory_value, "target.max_memory_mb", minimum=16, maximum=65_536)
+        if max_memory_value is not None
+        else None
+    )
     return BinaryTargetConfig(
         type="binary",
         command=command,
@@ -307,7 +313,19 @@ def _parse_binary_target(raw: Mapping[str, Any], base_dir: Path) -> BinaryTarget
         env=dict(env_value),
         expected_exit_codes=expected,
         max_output_bytes=max_output_bytes,
+        max_memory_mb=max_memory_mb,
     )
+
+
+def _parse_frames(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    values = tuple(_string_list(raw.get("frames", []), "target.frames"))
+    if len(values) > 64:
+        raise ConfigError("target.frames cannot contain more than 64 frames")
+    if any(len(value.encode("utf-8")) > 1_048_576 for value in values):
+        raise ConfigError("each target frame must be <= 1 MiB")
+    if values and not any("{input}" in value for value in values):
+        raise ConfigError("target.frames must contain the {input} placeholder")
+    return values
 
 
 def _network_port(raw: Mapping[str, Any]) -> int:
@@ -328,6 +346,7 @@ def _parse_tcp_target(raw: Mapping[str, Any], safety: SafetyConfig) -> TcpTarget
             raw.get("response_timeout_is_failure", False),
             "target.response_timeout_is_failure",
         ),
+        frames=_parse_frames(raw),
     )
 
 
@@ -345,6 +364,7 @@ def _parse_udp_target(raw: Mapping[str, Any], safety: SafetyConfig) -> UdpTarget
             raw.get("response_timeout_is_failure", False),
             "target.response_timeout_is_failure",
         ),
+        frames=_parse_frames(raw),
     )
 
 
@@ -426,6 +446,9 @@ def load_config(path: str | Path) -> RunConfig:
     )
     save_all_inputs = _bool(run.get("save_all_inputs", False), "run.save_all_inputs")
     stop_on_finding = _bool(run.get("stop_on_finding", False), "run.stop_on_finding")
+    scheduler = _string(run.get("scheduler", "random"), "run.scheduler").lower()
+    if scheduler not in {"random", "feedback"}:
+        raise ConfigError("run.scheduler must be either random or feedback")
     output_dir = _resolve_path(base_dir, run.get("output_dir", "artifacts"), "run.output_dir")
 
     corpus_paths = tuple(
@@ -469,6 +492,7 @@ def load_config(path: str | Path) -> RunConfig:
         target=target,
         mutations=mutations,
         safety=safety,
+        scheduler=scheduler,
     )
 
 
@@ -504,6 +528,7 @@ def config_to_dict(config: RunConfig) -> dict[str, Any]:
         "max_input_size": config.max_input_size,
         "save_all_inputs": config.save_all_inputs,
         "stop_on_finding": config.stop_on_finding,
+        "scheduler": config.scheduler,
         "target": target,
         "mutations": mutation,
         "safety": asdict(config.safety),

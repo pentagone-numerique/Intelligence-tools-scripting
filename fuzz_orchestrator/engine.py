@@ -21,6 +21,7 @@ from .targets import Target, build_target
 
 _MAX_CORPUS_FILES = 10_000
 _MAX_CORPUS_BYTES = 64 * 1024 * 1024
+_MAX_ADAPTIVE_SEEDS = 10_000
 _RUN_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -66,6 +67,28 @@ def load_corpus(config: RunConfig) -> list[bytes]:
     return corpus
 
 
+def _feedback_signature(result: ExecutionResult) -> str:
+    """Hash observable target behavior, not the generated input.
+
+    This is deliberately called *observable feedback*, not code coverage: it
+    works for network targets and uninstrumented binaries.  It is useful for
+    spotting new status/response/output classes while remaining honest about
+    what the orchestrator can measure.
+    """
+
+    digest = hashlib.sha256()
+    digest.update(result.status.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(str(result.returncode).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(str(result.response_status).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(result.stdout)
+    digest.update(b"\0")
+    digest.update(result.stderr)
+    return digest.hexdigest()
+
+
 @dataclass
 class RunSummary:
     requested: int
@@ -74,6 +97,7 @@ class RunSummary:
     statuses: dict[str, int]
     run_dir: Path
     stopped_early: bool = False
+    novel_behaviors: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +106,7 @@ class RunSummary:
             "findings": self.findings,
             "statuses": self.statuses,
             "run_dir": str(self.run_dir),
+            "novel_behaviors": self.novel_behaviors,
             "stopped_early": self.stopped_early,
         }
 
@@ -186,6 +211,10 @@ class FuzzEngine:
         self.corpus = load_corpus(config)
         self.mutator = Mutator(config.mutations, config.max_input_size)
         self.target: Target = build_target(config.target, config.timeout_seconds, config.safety)
+        self._adaptive_corpus = list(self.corpus)
+        self._adaptive_hashes = {hashlib.sha256(seed).digest() for seed in self.corpus}
+        self._adaptive_bytes = sum(len(seed) for seed in self.corpus)
+        self._adaptive_lock = threading.Lock()
 
     def plan(self) -> dict[str, Any]:
         return {
@@ -198,6 +227,7 @@ class FuzzEngine:
             "timeout_seconds": self.config.timeout_seconds,
             "max_input_size": self.config.max_input_size,
             "network_enabled": self.config.safety.allow_network,
+            "scheduler": self.config.scheduler,
             "operations": list(self.config.mutations.operations),
         }
 
@@ -214,8 +244,10 @@ class FuzzEngine:
         store = ArtifactStore(run_dir, self.config)
         store.write_manifest(len(self.corpus))
         statuses: Counter[str] = Counter()
+        feedback_seen: set[str] = set()
         findings = 0
         executed = 0
+        novel_behaviors = 0
         stopped_early = False
 
         pending: dict[Future[tuple[ExecutionResult, bytes]], int] = {}
@@ -233,9 +265,33 @@ class FuzzEngine:
 
                 while pending:
                     done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
-                    for future in done:
+                    for future in sorted(done, key=lambda item: pending[item]):
                         pending.pop(future, None)
                         result, payload = future.result()
+                        signature = _feedback_signature(result)
+                        is_novel = signature not in feedback_seen
+                        feedback_seen.add(signature)
+                        result.metadata = {
+                            **result.metadata,
+                            "feedback_signature": signature,
+                            "novel_behavior": is_novel,
+                        }
+                        adaptive_seed_added = False
+                        if is_novel:
+                            novel_behaviors += 1
+                            if self.config.scheduler == "feedback":
+                                payload_hash = hashlib.sha256(payload).digest()
+                                with self._adaptive_lock:
+                                    if (
+                                        payload_hash not in self._adaptive_hashes
+                                        and len(self._adaptive_corpus) < _MAX_ADAPTIVE_SEEDS
+                                        and self._adaptive_bytes + len(payload) <= _MAX_CORPUS_BYTES
+                                    ):
+                                        self._adaptive_corpus.append(payload)
+                                        self._adaptive_hashes.add(payload_hash)
+                                        self._adaptive_bytes += len(payload)
+                                        adaptive_seed_added = True
+                        result.metadata["adaptive_seed_added"] = adaptive_seed_added
                         store.record(result, payload)
                         statuses[result.status] += 1
                         executed += 1
@@ -264,6 +320,7 @@ class FuzzEngine:
             findings=findings,
             statuses=dict(sorted(statuses.items())),
             run_dir=run_dir,
+            novel_behaviors=novel_behaviors,
             stopped_early=stopped_early,
         )
         _write_json(run_dir / "summary.json", summary.as_dict())
@@ -273,8 +330,13 @@ class FuzzEngine:
         case_id = f"{index:08d}"
         case_seed = self.config.seed + index
         rng = random.Random(case_seed)
-        corpus_index = rng.randrange(len(self.corpus))
-        payload = self.mutator.mutate(self.corpus[corpus_index], rng, self.corpus)
+        if self.config.scheduler == "feedback":
+            with self._adaptive_lock:
+                corpus = tuple(self._adaptive_corpus)
+        else:
+            corpus = self.corpus
+        corpus_index = rng.randrange(len(corpus))
+        payload = self.mutator.mutate(corpus[corpus_index], rng, corpus)
         try:
             result = self.target.execute(payload, case_id)
         except Exception as exc:  # target plug-ins should not abort the campaign
@@ -290,5 +352,6 @@ class FuzzEngine:
             **result.metadata,
             "case_seed": case_seed,
             "corpus_index": corpus_index,
+            "scheduler_corpus_size": len(corpus),
         }
         return result, payload

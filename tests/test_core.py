@@ -10,10 +10,10 @@ from pathlib import Path
 
 from fuzz_orchestrator.config import ConfigError, load_config
 from fuzz_orchestrator.engine import FuzzEngine
-from fuzz_orchestrator.models import MutationConfig
+from fuzz_orchestrator.minimize import minimize_payload
+from fuzz_orchestrator.models import BinaryTargetConfig, MutationConfig
 from fuzz_orchestrator.mutations import Mutator
 from fuzz_orchestrator.targets import BinaryTarget
-from fuzz_orchestrator.models import BinaryTargetConfig
 
 
 class MutationTests(unittest.TestCase):
@@ -84,6 +84,27 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(path)
 
+    def test_stateful_frames_require_the_input_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            path = self._write(
+                directory,
+                """
+                [corpus]
+                inline = ["seed"]
+                [safety]
+                allow_network = true
+                allowed_hosts = ["127.0.0.1"]
+                [target]
+                type = "tcp"
+                host = "127.0.0.1"
+                port = 9001
+                frames = ["HELLO\\n", "{input}", "QUIT\\n"]
+                """,
+            )
+            config = load_config(path)
+            self.assertEqual(config.target.frames, ("HELLO\n", "{input}", "QUIT\n"))
+
 
 class TargetTests(unittest.TestCase):
     def test_binary_nonzero_exit_is_reported(self) -> None:
@@ -132,6 +153,7 @@ class EngineTests(unittest.TestCase):
                         "name = 'test'",
                         "iterations = 3",
                         "workers = 2",
+                        "scheduler = 'feedback'",
                         "output_dir = " + output,
                         "[corpus]",
                         "inline = ['seed']",
@@ -151,8 +173,37 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(summary.executed, 3)
             self.assertEqual(summary.findings, 3)
             self.assertEqual(summary.statuses, {"nonzero_exit": 3})
+            self.assertEqual(summary.novel_behaviors, 1)
             self.assertTrue((summary.run_dir / "summary.json").exists())
             self.assertEqual(len(list((summary.run_dir / "findings").glob("*.bin"))), 3)
+
+    def test_minimizer_preserves_finding_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            config_path = directory / "campaign.toml"
+            command = json.dumps(
+                [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); sys.exit(3)"]
+            )
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[corpus]",
+                        "inline = ['seed']",
+                        "[target]",
+                        "type = 'binary'",
+                        f"command = {command}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = minimize_payload(
+                FuzzEngine(load_config(config_path)),
+                b"abcdefghijklmnop",
+                max_attempts=50,
+            )
+            self.assertEqual(result.original.status, "nonzero_exit")
+            self.assertEqual(result.minimized.status, "nonzero_exit")
+            self.assertLess(len(result.payload), 16)
 
 
 if __name__ == "__main__":
