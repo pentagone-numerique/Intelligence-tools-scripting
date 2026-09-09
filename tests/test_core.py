@@ -53,6 +53,42 @@ class ConfigTests(unittest.TestCase):
         path.write_text(textwrap.dedent(contents), encoding="utf-8")
         return path
 
+    def test_salomon_schema_translates_without_legacy_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            (directory / "seeds").mkdir()
+            (directory / "seeds" / "seed.bin").write_bytes(b"seed")
+            path = self._write(
+                directory,
+                """
+                schema_version = 1
+                [project]
+                name = "schema-demo"
+                [run]
+                iterations = 2
+                [engine]
+                backend = "builtin"
+                scheduler = "feedback"
+                [corpus]
+                directory = "seeds"
+                [limits]
+                timeout_ms = 250
+                max_input_bytes = 64
+                [reporting]
+                output_directory = "artifacts"
+                [target]
+                kind = "binary"
+                command = ["/bin/cat"]
+                input = "stdin"
+                """,
+            )
+            config = load_config(path)
+            self.assertEqual(config.name, "schema-demo")
+            self.assertEqual(config.timeout_seconds, 0.25)
+            self.assertEqual(config.scheduler, "feedback")
+            self.assertEqual(config.max_input_size, 64)
+            self.assertEqual(config.corpus_paths[0], (directory / "seeds").resolve())
+
     def test_network_requires_explicit_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)

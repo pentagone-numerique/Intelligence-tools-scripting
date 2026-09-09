@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package salomon.v1;
+
+// Control-plane protocol only. Test inputs stay local to a worker whenever
+// possible; corpus and coverage are exchanged in batches.
+service SalomonWorker {
+  rpc GetCapabilities(Empty) returns (Capabilities);
+  rpc ExecuteBatch(stream ExecuteRequest) returns (stream ExecuteResponse);
+  rpc PushCorpus(stream CorpusChunk) returns (Ack);
+  rpc SubscribeStats(StatsRequest) returns (stream CampaignStats);
+  rpc StopCampaign(StopRequest) returns (Ack);
+}
+
+message Empty {}
+
+message Capabilities {
+  string worker_id = 1;
+  string platform = 2;
+  uint32 cpu_count = 3;
+  repeated string backends = 4;
+  repeated string target_kinds = 5;
+  uint32 coverage_map_size = 6;
+}
+
+message ExecuteRequest {
+  string campaign_id = 1;
+  uint64 input_id = 2;
+  bytes input = 3;
+  uint64 parent_id = 4;
+}
+
+message ExecuteResponse {
+  uint64 input_id = 1;
+  string status = 2;
+  uint64 duration_us = 3;
+  int32 return_code = 4;
+  bytes coverage_delta = 5;
+  bytes stdout_hash = 6;
+  bytes stderr_hash = 7;
+  BugReport bug = 8;
+}
+
+message CorpusChunk {
+  string campaign_id = 1;
+  string entry_hash = 2;
+  uint64 parent_id = 3;
+  bytes input = 4;
+  bytes coverage_delta = 5;
+  bool favored = 6;
+}
+
+message BugReport {
+  string kind = 1;
+  uint64 input_id = 2;
+  string signature = 3;
+  string detail = 4;
+  string artifact_path = 5;
+}
+
+message StatsRequest {
+  string campaign_id = 1;
+  uint32 interval_ms = 2;
+}
+
+message CampaignStats {
+  string campaign_id = 1;
+  uint64 executions = 2;
+  uint64 executions_per_second = 3;
+  uint64 corpus_entries = 4;
+  uint64 unique_edges = 5;
+  uint64 unique_findings = 6;
+  uint64 workers = 7;
+}
+
+message StopRequest {
+  string campaign_id = 1;
+  string reason = 2;
+}
+
+message Ack {
+  bool accepted = 1;
+  string message = 2;
+}

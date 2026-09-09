@@ -16,7 +16,91 @@ from .dashboard import serve as serve_dashboard
 from .engine import CorpusError, FuzzEngine
 from .external import ExternalFuzzEngine
 from .minimize import minimize_payload, replay_payload
-from .models import ExecutionResult
+from .models import (
+    BinaryTargetConfig,
+    EngineConfig,
+    ExecutionResult,
+    MutationConfig,
+    RunConfig,
+    SafetyConfig,
+)
+
+
+def _salomon_template(kind: str) -> str:
+    target_block = {
+        "binary": '''[target]
+kind = "binary"
+command = ["./path/to/your-target"]
+input = "stdin"
+''',
+        "tcp": '''[target]
+kind = "tcp"
+host = "127.0.0.1"
+port = 9001
+expect_response = false
+''',
+        "udp": '''[target]
+kind = "udp"
+host = "127.0.0.1"
+port = 9001
+expect_response = false
+''',
+        "http": '''[target]
+kind = "http"
+url = "http://127.0.0.1:8080/parse"
+method = "POST"
+input_location = "body"
+headers = { Content-Type = "application/octet-stream" }
+''',
+        "differential": '''[target]
+kind = "differential"
+
+[target.left]
+kind = "binary"
+command = ["./stable-target"]
+input = "stdin"
+
+[target.right]
+kind = "binary"
+command = ["./candidate-target"]
+input = "stdin"
+''',
+    }[kind]
+    return f'''# SALOMON configuration schema v1.
+# Compatible with: salomon validate Salomon.toml
+schema_version = 1
+
+[project]
+name = "salomon-campaign"
+
+[run]
+iterations = 100
+workers = 1
+seed = 1337
+
+[engine]
+backend = "builtin" # builtin, aflpp, libfuzzer, command
+scheduler = "feedback" # random or feedback
+
+[corpus]
+directory = "seeds"
+inline = ["hello"]
+
+[limits]
+timeout_ms = 2000
+max_input_bytes = 1048576
+# Network targets only:
+# max_requests_per_second = 10
+
+[reporting]
+output_directory = "artifacts"
+
+[safety]
+allow_network = false
+allowed_hosts = ["127.0.0.1", "localhost", "::1"]
+max_response_bytes = 65536
+
+{target_block}'''
 
 
 def _template(kind: str) -> str:
@@ -130,7 +214,7 @@ headers = { Content-Type = "application/octet-stream" }
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="fuzz-orchestrator",
+        prog="salomon" if Path(sys.argv[0]).name == "salomon" else "fuzz-orchestrator",
         description="Orchestrateur de fuzzing local et réseau, à garde-fous explicites.",
     )
     parser.add_argument("--version", action="version", version=__version__)
@@ -145,6 +229,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="type de cible à préconfigurer",
     )
     init.add_argument("--force", action="store_true", help="remplacer les fichiers existants")
+    init.add_argument(
+        "--format",
+        choices=("legacy", "salomon"),
+        default="legacy",
+        help="format à générer (legacy pour fuzz.toml, salomon pour Salomon.toml)",
+    )
 
     validate = subparsers.add_parser("validate", help="valider une configuration et son corpus")
     validate.add_argument("config", help="fichier TOML ou JSON")
@@ -157,6 +247,19 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, help="surcharger temporairement run.seed")
     run.add_argument("--output-dir", help="surcharger temporairement run.output_dir")
     run.add_argument("--verbose", action="store_true", help="afficher chaque finding")
+
+    fuzz = subparsers.add_parser("fuzz", help="lancer SALOMON avec un fichier ou une cible rapide")
+    fuzz.add_argument("--config", help="Salomon.toml ou fuzz.toml existant")
+    fuzz.add_argument("--target", help="chemin d'un binaire à fuzz, si --config est absent")
+    fuzz.add_argument("--input", help="fichier ou dossier de corpus, si --config est absent")
+    fuzz.add_argument("--iterations", type=int, default=100, help="nombre de cas en mode rapide")
+    fuzz.add_argument("--timeout-ms", type=float, default=2000.0, help="timeout par cas en mode rapide")
+    fuzz.add_argument("--max-input-bytes", type=int, default=1_048_576, help="taille maximale d'entrée")
+    fuzz.add_argument("--workers", type=int, default=1, help="nombre de workers")
+    fuzz.add_argument("--seed", type=int, default=1337, help="seed de reproductibilité")
+    fuzz.add_argument("--output-dir", default="artifacts", help="dossier de sortie")
+    fuzz.add_argument("--dry-run", action="store_true", help="prévisualiser sans exécuter")
+    fuzz.add_argument("--verbose", action="store_true", help="afficher chaque finding")
 
     replay = subparsers.add_parser("replay", help="rejouer une entrée sauvegardée")
     replay.add_argument("config", help="fichier TOML ou JSON")
@@ -186,7 +289,8 @@ def _init(args: argparse.Namespace) -> int:
         print(f"corpus déjà présent: {seed_dir} (utilisez --force pour compléter)", file=sys.stderr)
         return 2
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_template(args.kind), encoding="utf-8")
+    template = _salomon_template(args.kind) if args.format == "salomon" else _template(args.kind)
+    path.write_text(template, encoding="utf-8")
     seed_dir.mkdir(parents=True, exist_ok=True)
     sample = seed_dir / "hello.txt"
     if args.force or not sample.exists():
@@ -196,7 +300,74 @@ def _init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_engine(config_path: str, args: argparse.Namespace) -> FuzzEngine:
+def _quick_config(args: argparse.Namespace) -> RunConfig:
+    if not args.target or not args.input:
+        raise ConfigError("mode rapide: --target et --input sont obligatoires")
+    if args.iterations < 1:
+        raise ConfigError("--iterations doit être >= 1")
+    if args.workers < 1 or args.workers > 64:
+        raise ConfigError("--workers doit être compris entre 1 et 64")
+    if args.timeout_ms <= 0:
+        raise ConfigError("--timeout-ms doit être > 0")
+    if args.max_input_bytes < 1:
+        raise ConfigError("--max-input-bytes doit être >= 1")
+    target_path = Path(args.target).expanduser().resolve()
+    input_path = Path(args.input).expanduser().resolve()
+    return RunConfig(
+        name=target_path.stem or "salomon-quick",
+        iterations=args.iterations,
+        workers=args.workers,
+        seed=args.seed,
+        output_dir=Path(args.output_dir).expanduser().resolve(),
+        corpus_paths=(input_path,),
+        inline_seeds=(),
+        timeout_seconds=args.timeout_ms / 1000.0,
+        max_input_size=args.max_input_bytes,
+        save_all_inputs=False,
+        stop_on_finding=False,
+        target=BinaryTargetConfig(
+            type="binary",
+            command=(str(target_path),),
+            input_mode="stdin",
+        ),
+        mutations=MutationConfig(),
+        safety=SafetyConfig(),
+        scheduler="feedback",
+        engine=EngineConfig(),
+    )
+
+
+def _fuzz(args: argparse.Namespace) -> int:
+    if args.config:
+        proxy = argparse.Namespace(
+            config=args.config,
+            dry_run=args.dry_run,
+            limit=None,
+            workers=None,
+            seed=None,
+            output_dir=None,
+            verbose=args.verbose,
+        )
+        return _run(proxy)
+    config = _quick_config(args)
+    engine = FuzzEngine(config)
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "plan": engine.plan()}, indent=2, ensure_ascii=False))
+        return 0
+    on_finding = None
+    if args.verbose:
+        def print_finding(result: ExecutionResult) -> None:
+            print(f"[finding] case={result.case_id} status={result.status}")
+
+        on_finding = print_finding
+    summary = engine.run(on_finding=on_finding)
+    print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+    return 0 if summary.findings == 0 else 1
+
+
+def _load_engine(
+    config_path: str, args: argparse.Namespace
+) -> FuzzEngine | ExternalFuzzEngine:
     config = load_config(config_path)
     if getattr(args, "workers", None) is not None:
         if args.workers < 1 or args.workers > 64:
@@ -316,6 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _validate(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "fuzz":
+            return _fuzz(args)
         if args.command == "replay":
             return _replay(args)
         if args.command == "minimize":

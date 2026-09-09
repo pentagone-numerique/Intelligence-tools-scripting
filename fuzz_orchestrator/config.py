@@ -111,6 +111,81 @@ def _resolve_path(base_dir: Path, value: Any, field: str) -> Path:
     return path.resolve()
 
 
+def _normalize_salomon_target(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ConfigError("target must be a table/object")
+    normalized = dict(value)
+    if "kind" in normalized and "type" not in normalized:
+        normalized["type"] = normalized.pop("kind")
+    if "input" in normalized and "input_mode" not in normalized:
+        normalized["input_mode"] = normalized.pop("input")
+    for side in ("left", "right"):
+        if side in normalized:
+            normalized[side] = _normalize_salomon_target(normalized[side])
+    return normalized
+
+
+def _normalize_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Translate the public Salomon.toml schema to the legacy internal schema.
+
+    Keeping this translation at the configuration boundary lets the current
+    Python engine and all existing fuzz.toml files keep working unchanged.
+    """
+
+    if "schema_version" not in value:
+        return value
+    version = value.get("schema_version")
+    if version != 1:
+        raise ConfigError(f"unsupported Salomon.toml schema_version: {version!r}")
+
+    project = value.get("project", {})
+    run_source = value.get("run", {})
+    engine_source = value.get("engine", {})
+    corpus_source = value.get("corpus", {})
+    limits = value.get("limits", {})
+    reporting = value.get("reporting", {})
+    target_source = value.get("target", {})
+    if not all(isinstance(item, Mapping) for item in (project, run_source, engine_source, corpus_source, limits, reporting, target_source)):
+        raise ConfigError("Salomon.toml sections must be tables/objects")
+
+    run = dict(run_source)
+    if "name" not in run and "name" in project:
+        run["name"] = project["name"]
+    if "output_dir" not in run and "output_directory" in reporting:
+        run["output_dir"] = reporting["output_directory"]
+    if "timeout_seconds" not in run and "timeout_ms" in limits:
+        try:
+            run["timeout_seconds"] = float(limits["timeout_ms"]) / 1000.0
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("limits.timeout_ms must be numeric") from exc
+    if "max_input_size" not in run and "max_input_bytes" in limits:
+        run["max_input_size"] = limits["max_input_bytes"]
+    if "max_requests_per_second" not in run and "max_requests_per_second" in limits:
+        run["max_requests_per_second"] = limits["max_requests_per_second"]
+    if "scheduler" not in run and "scheduler" in engine_source:
+        run["scheduler"] = engine_source["scheduler"]
+
+    engine = dict(engine_source)
+    if "type" not in engine and "backend" in engine:
+        engine["type"] = engine.pop("backend")
+
+    corpus = dict(corpus_source)
+    if "paths" not in corpus and "directory" in corpus:
+        directories = corpus["directory"]
+        corpus["paths"] = directories if isinstance(directories, list) else [directories]
+
+    normalized: dict[str, Any] = dict(value)
+    normalized.update(
+        {
+            "run": run,
+            "engine": engine,
+            "corpus": corpus,
+            "target": _normalize_salomon_target(target_source),
+        }
+    )
+    return normalized
+
+
 def _load_document(path: Path) -> Mapping[str, Any]:
     try:
         raw_bytes = path.read_bytes()
@@ -127,7 +202,7 @@ def _load_document(path: Path) -> Mapping[str, Any]:
 
     if not isinstance(value, Mapping):
         raise ConfigError("the configuration root must be a table/object")
-    return value
+    return _normalize_document(value)
 
 
 def _host_matches(host: str, allowed: str) -> bool:

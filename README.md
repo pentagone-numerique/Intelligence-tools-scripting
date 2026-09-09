@@ -20,6 +20,18 @@ Le projet est volontairement **safety-first** : les cibles réseau sont désacti
 
 Le module fonctionne directement depuis le dépôt :
 
+Le nom SALOMON est introduit sans casser l'ancien CLI. Les deux formats sont
+acceptés ; `Salomon.toml` est traduit vers le moteur actuel à la frontière de
+configuration.
+
+```bash
+python3 -m fuzz_orchestrator init Salomon.toml --format salomon --kind binary
+python3 -m fuzz_orchestrator validate Salomon.toml
+python3 -m fuzz_orchestrator fuzz --config Salomon.toml --limit 100
+# Après installation du package :
+# salomon fuzz --target ./mon_binaire --input ./seeds/
+```
+
 ```bash
 python3 -m fuzz_orchestrator init fuzz.toml --kind binary
 # Modifier target.command pour pointer vers le programme à tester.
@@ -36,6 +48,10 @@ fuzz-orchestrator run fuzz.toml --limit 100
 ```
 
 Un exemple de cible locale est disponible dans `examples/targets/demo_binary.py`.
+
+Le socle de migration SALOMON est documenté dans `docs/architecture.md`, avec
+les contrats Rust dans `rust/crates/salomon-core` et le protocole de contrôle
+futur dans `proto/salomon.proto`.
 
 ## Configuration TOML
 

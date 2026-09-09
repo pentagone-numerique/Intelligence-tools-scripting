@@ -1,0 +1,44 @@
+# SALOMON configuration schema v1.
+# Paths are resolved relative to this file.
+schema_version = 1
+
+[project]
+name = "salomon-demo"
+
+[run]
+iterations = 100
+workers = 1
+seed = 1337
+
+[engine]
+# builtin, aflpp, libfuzzer or command
+backend = "builtin"
+# random or feedback
+scheduler = "feedback"
+
+[corpus]
+directory = "seeds"
+inline = ["hello"]
+
+[limits]
+timeout_ms = 2000
+max_input_bytes = 1048576
+# For network targets only:
+# max_requests_per_second = 10
+
+[reporting]
+output_directory = "../artifacts"
+
+[safety]
+# Network access is opt-in and disabled for this local example.
+allow_network = false
+allowed_hosts = ["127.0.0.1", "localhost", "::1"]
+max_response_bytes = 65536
+
+[target]
+kind = "binary"
+command = ["python3", "examples/targets/demo_binary.py"]
+input = "stdin"
+cwd = ".."
+expected_exit_codes = [0]
+max_output_bytes = 65536

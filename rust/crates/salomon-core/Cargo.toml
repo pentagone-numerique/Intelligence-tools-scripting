@@ -1,0 +1,9 @@
+[package]
+name = "salomon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable contracts for the SALOMON fuzzing engine"
+
+[lib]
+path = "src/lib.rs"
