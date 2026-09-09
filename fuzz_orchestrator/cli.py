@@ -56,6 +56,20 @@ allowed_hosts = ["127.0.0.1", "localhost", "::1"]
 max_response_bytes = 65536
 
 '''
+    if kind == "differential":
+        return common + '''[target]
+type = "differential"
+
+[target.left]
+type = "binary"
+command = ["./stable-target"]
+input_mode = "stdin"
+
+[target.right]
+type = "binary"
+command = ["./candidate-target"]
+input_mode = "stdin"
+'''
     if kind == "binary":
         return common + '''[target]
 type = "binary"
@@ -126,7 +140,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument("path", nargs="?", default="fuzz.toml", help="fichier TOML à créer")
     init.add_argument(
         "--kind",
-        choices=("binary", "tcp", "udp", "http"),
+        choices=("binary", "tcp", "udp", "http", "differential"),
         default="binary",
         help="type de cible à préconfigurer",
     )

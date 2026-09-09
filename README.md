@@ -7,6 +7,7 @@ Un orchestrateur de fuzzing extensible, écrit en Python 3.11 et sans dépendanc
 - un service UDP ;
 - une URL HTTP/HTTPS avec l’entrée dans le corps, la query string ou un header ;
 - des échanges TCP/UDP multi-trames pour les protocoles avec état ;
+- du fuzzing différentiel entre deux implémentations ;
 - replay et minimisation automatique des findings ;
 - délégation optionnelle à AFL++, libFuzzer ou une commande de fuzzing externe ;
 - pacing réseau, déduplication des findings et index SQLite pour les campagnes longues.
@@ -92,6 +93,27 @@ input_mode = "file"
 ```
 
 Le placeholder `{input}` est remplacé par un chemin temporaire différent à chaque cas. Pour une entrée texte en argument, utiliser `input_mode = "argv"`. Les commandes sont des tableaux d’arguments, jamais des chaînes shell.
+
+### Fuzzing différentiel
+
+Deux cibles peuvent recevoir exactement les mêmes entrées pour détecter une divergence entre deux versions ou implémentations :
+
+```toml
+[target]
+type = "differential"
+
+[target.left]
+type = "binary"
+command = ["./parser-stable"]
+input_mode = "stdin"
+
+[target.right]
+type = "binary"
+command = ["./parser-new"]
+input_mode = "stdin"
+```
+
+Le moteur classe les cas en `divergence` lorsque les statuts, codes de retour, réponses ou sorties diffèrent. Un crash partagé reste classé `shared_finding`. Les deux sous-cibles peuvent aussi être TCP, UDP ou HTTP, avec les mêmes règles d’autorisation réseau.
 
 ### Moteurs externes et vraie couverture
 
@@ -213,6 +235,8 @@ Statuts principaux :
 - `nonzero_exit` : code de sortie inattendu ;
 - `timeout` : limite de temps dépassée ;
 - `server_error` : réponse HTTP 5xx ;
+- `divergence` : comportement différent entre deux sous-cibles ;
+- `shared_finding` : finding présent sur les deux sous-cibles ;
 - `connection_error` / `error` : erreur de transport ou d’exécution.
 
 Le CLI retourne `0` sans finding, `1` si la campagne a trouvé un cas non-OK, et `2` pour une configuration invalide.

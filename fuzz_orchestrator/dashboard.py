@@ -51,7 +51,7 @@ table { width:100%; border-collapse:collapse; min-width:690px; }
 th,td { text-align:left; padding:10px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
 .status { display:inline-flex; border-radius:99px; padding:3px 9px; font-size:12px; font-weight:700; background:var(--panel2); }
-.status.ok { color:var(--good); } .status.finding,.status.crash,.status.server_error,.status.nonzero_exit { color:var(--bad); }
+.status.ok { color:var(--good); } .status.finding,.status.crash,.status.divergence,.status.shared_finding,.status.server_error,.status.nonzero_exit { color:var(--bad); }
 .status.timeout { color:var(--warn); } .status.connection_error,.status.engine_error { color:#ff9b71; }
 a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
 .actions { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
@@ -294,7 +294,7 @@ class DashboardServer(ThreadingHTTPServer):
 class DashboardHandler(BaseHTTPRequestHandler):
     """Serve one run directory; the instance is created with ``run_dir``."""
 
-    server_version = "FuzzDashboard/0.2"
+    server_version = "FuzzDashboard/0.5"
 
     @property
     def run_dir(self) -> Path:

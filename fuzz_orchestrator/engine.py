@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .config import config_to_dict
-from .models import ExecutionResult, RunConfig
+from .models import DifferentialTargetConfig, ExecutionResult, RunConfig, TargetConfig
 from .mutations import Mutator
 from .targets import Target, build_target
 
@@ -89,6 +89,14 @@ def _feedback_signature(result: ExecutionResult) -> str:
     digest.update(b"\0")
     digest.update(result.stderr)
     return digest.hexdigest()
+
+
+def _contains_network_target(config: TargetConfig) -> bool:
+    if config.type in {"tcp", "udp", "http"}:
+        return True
+    if isinstance(config, DifferentialTargetConfig):
+        return _contains_network_target(config.left) or _contains_network_target(config.right)
+    return False
 
 
 class RateLimiter:
@@ -305,16 +313,23 @@ class FuzzEngine:
         self.config = config
         self.corpus = load_corpus(config)
         self.mutator = Mutator(config.mutations, config.max_input_size)
-        self.target: Target = build_target(config.target, config.timeout_seconds, config.safety)
         self._adaptive_corpus = list(self.corpus)
         self._adaptive_hashes = {hashlib.sha256(seed).digest() for seed in self.corpus}
         self._adaptive_bytes = sum(len(seed) for seed in self.corpus)
         self._adaptive_lock = threading.Lock()
-        is_network = self.config.target.type in {"tcp", "udp", "http"}
+        is_network = _contains_network_target(self.config.target)
         self._rate_limiter = (
             RateLimiter(self.config.max_requests_per_second)
             if is_network and self.config.max_requests_per_second is not None
             else None
+        )
+        self._rate_delay_local = threading.local()
+        request_wait = self._wait_for_request if self._rate_limiter is not None else None
+        self.target: Target = build_target(
+            config.target,
+            config.timeout_seconds,
+            config.safety,
+            request_wait=request_wait,
         )
 
     def plan(self) -> dict[str, Any]:
@@ -437,6 +452,14 @@ class FuzzEngine:
         _write_json(run_dir / "summary.json", summary.as_dict())
         return summary
 
+    def _wait_for_request(self) -> float:
+        if self._rate_limiter is None:
+            return 0.0
+        delay = self._rate_limiter.wait()
+        previous = getattr(self._rate_delay_local, "seconds", 0.0)
+        self._rate_delay_local.seconds = previous + delay
+        return delay
+
     def _execute_case(self, index: int) -> tuple[ExecutionResult, bytes]:
         case_id = f"{index:08d}"
         case_seed = self.config.seed + index
@@ -448,9 +471,7 @@ class FuzzEngine:
             corpus = self.corpus
         corpus_index = rng.randrange(len(corpus))
         payload = self.mutator.mutate(corpus[corpus_index], rng, corpus)
-        rate_delay_ms = 0.0
-        if self._rate_limiter is not None:
-            rate_delay_ms = round(self._rate_limiter.wait() * 1000.0, 3)
+        self._rate_delay_local.seconds = 0.0
         try:
             result = self.target.execute(payload, case_id)
         except Exception as exc:  # target plug-ins should not abort the campaign
@@ -462,6 +483,8 @@ class FuzzEngine:
                 stderr=str(exc).encode("utf-8", errors="replace"),
                 metadata={"exception": type(exc).__name__},
             )
+        rate_delay_ms = round(getattr(self._rate_delay_local, "seconds", 0.0) * 1000.0, 3)
+        self._rate_delay_local.seconds = 0.0
         result.metadata = {
             **result.metadata,
             "case_seed": case_seed,

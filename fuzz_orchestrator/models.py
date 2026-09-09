@@ -94,11 +94,19 @@ class HttpTargetConfig:
     input_header: str = "X-Fuzz-Input"
 
 
+@dataclass(frozen=True)
+class DifferentialTargetConfig:
+    type: str
+    left: "TargetConfig"
+    right: "TargetConfig"
+
+
 TargetConfig = Union[
     BinaryTargetConfig,
     TcpTargetConfig,
     UdpTargetConfig,
     HttpTargetConfig,
+    DifferentialTargetConfig,
 ]
 
 

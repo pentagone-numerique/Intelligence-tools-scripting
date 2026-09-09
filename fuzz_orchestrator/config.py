@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from .models import (
     BinaryTargetConfig,
+    DifferentialTargetConfig,
     EngineConfig,
     HttpTargetConfig,
     MutationConfig,
@@ -417,6 +418,35 @@ def _parse_http_target(raw: Mapping[str, Any], safety: SafetyConfig) -> HttpTarg
     )
 
 
+def _parse_target(
+    raw: Mapping[str, Any],
+    base_dir: Path,
+    safety: SafetyConfig,
+) -> TargetConfig:
+    target_type = _string(raw.get("type"), "target.type").lower()
+    if target_type == "binary":
+        return _parse_binary_target(raw, base_dir)
+    if target_type == "tcp":
+        return _parse_tcp_target(raw, safety)
+    if target_type == "udp":
+        return _parse_udp_target(raw, safety)
+    if target_type == "http":
+        return _parse_http_target(raw, safety)
+    if target_type == "differential":
+        left = raw.get("left")
+        right = raw.get("right")
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            raise ConfigError(
+                "differential targets require [target.left] and [target.right] tables"
+            )
+        return DifferentialTargetConfig(
+            type="differential",
+            left=_parse_target(left, base_dir, safety),
+            right=_parse_target(right, base_dir, safety),
+        )
+    raise ConfigError("target.type must be one of: binary, tcp, udp, http, differential")
+
+
 def _parse_engine(raw: Mapping[str, Any]) -> EngineConfig:
     engine_type = _string(raw.get("type", "builtin"), "engine.type").lower()
     if engine_type not in _ALLOWED_ENGINES:
@@ -515,18 +545,7 @@ def load_config(path: str | Path) -> RunConfig:
     safety = _parse_safety(safety_raw)
     mutations = _parse_mutations(mutations_raw, base_dir)
     engine = _parse_engine(engine_raw)
-    target_type = _string(target_raw.get("type"), "target.type").lower()
-    if target_type == "binary":
-        target = _parse_binary_target(target_raw, base_dir)
-    elif target_type == "tcp":
-        target = _parse_tcp_target(target_raw, safety)
-    elif target_type == "udp":
-        target = _parse_udp_target(target_raw, safety)
-    elif target_type == "http":
-        target = _parse_http_target(target_raw, safety)
-    else:
-        # Keep the message stable and helpful for typos.
-        raise ConfigError("target.type must be one of: binary, tcp, udp, http")
+    target = _parse_target(target_raw, base_dir, safety)
     if engine.type != "builtin" and not isinstance(target, BinaryTargetConfig):
         raise ConfigError("external engines currently require target.type = binary")
 
@@ -551,24 +570,43 @@ def load_config(path: str | Path) -> RunConfig:
     )
 
 
+def _manifest_value(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        sensitive_headers = {
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+        }
+        if key == "env":
+            return {str(name): "<redacted>" for name in value}
+        if key == "headers":
+            return {
+                str(name): (
+                    "<redacted>"
+                    if str(name).lower() in sensitive_headers
+                    else _manifest_value(item, key=str(name))
+                )
+                for name, item in value.items()
+            }
+        return {
+            str(name): _manifest_value(item, key=str(name))
+            for name, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, (tuple, list)):
+        return [_manifest_value(item, key=key) for item in value]
+    return value
+
+
 def config_to_dict(config: RunConfig) -> dict[str, Any]:
     """Return a JSON-safe, redacted representation for manifests and CLI output."""
 
-    target = asdict(config.target)
-    if target.get("cwd") is not None:
-        target["cwd"] = str(target["cwd"])
-    target["command"] = list(target["command"]) if "command" in target else None
-    if "env" in target:
-        # Environment values and common credential-bearing HTTP headers should
-        # not be copied into a manifest or a result bundle.
-        target["env"] = {key: "<redacted>" for key in target["env"]}
-    if "headers" in target:
-        sensitive = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key"}
-        target["headers"] = {
-            key: ("<redacted>" if key.lower() in sensitive else value)
-            for key, value in target["headers"].items()
-        }
-    target = {key: value for key, value in target.items() if value is not None}
+    target = _manifest_value(asdict(config.target))
     mutation = asdict(config.mutations)
     mutation["dictionary"] = [base64.b64encode(item).decode("ascii") for item in config.mutations.dictionary]
     engine = asdict(config.engine)

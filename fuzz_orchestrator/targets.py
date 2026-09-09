@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import signal
 import socket
@@ -16,7 +17,7 @@ try:  # resource.prlimit is available on Linux and some other POSIX systems.
     import resource
 except ImportError:  # pragma: no cover - exercised on Windows only
     resource = None  # type: ignore[assignment]
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_from_bytes, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -24,6 +25,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from .config import host_is_allowed
 from .models import (
     BinaryTargetConfig,
+    DifferentialTargetConfig,
     ExecutionResult,
     HttpTargetConfig,
     SafetyConfig,
@@ -333,14 +335,23 @@ def _read_socket_response(sock: socket.socket, limit: int) -> tuple[bytes, bool]
 
 
 class TcpTarget:
-    def __init__(self, config: TcpTargetConfig, timeout_seconds: float, max_response_bytes: int):
+    def __init__(
+        self,
+        config: TcpTargetConfig,
+        timeout_seconds: float,
+        max_response_bytes: int,
+        request_wait: Callable[[], float] | None = None,
+    ):
         self.config = config
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
+        self.request_wait = request_wait
 
     def execute(self, payload: bytes, case_id: str) -> ExecutionResult:
         start = _now()
         try:
+            if self.request_wait is not None:
+                self.request_wait()
             frames = _render_frames(self.config.frames, payload)
             with socket.create_connection(
                 (self.config.host, self.config.port), timeout=self.timeout_seconds
@@ -379,15 +390,24 @@ class TcpTarget:
 
 
 class UdpTarget:
-    def __init__(self, config: UdpTargetConfig, timeout_seconds: float, max_response_bytes: int):
+    def __init__(
+        self,
+        config: UdpTargetConfig,
+        timeout_seconds: float,
+        max_response_bytes: int,
+        request_wait: Callable[[], float] | None = None,
+    ):
         self.config = config
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
+        self.request_wait = request_wait
 
     def execute(self, payload: bytes, case_id: str) -> ExecutionResult:
         start = _now()
         family = socket.AF_INET6 if ":" in self.config.host else socket.AF_INET
         try:
+            if self.request_wait is not None:
+                self.request_wait()
             frames = _render_frames(self.config.frames, payload)
             with socket.socket(family, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(self.timeout_seconds)
@@ -429,14 +449,23 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class HttpTarget:
-    def __init__(self, config: HttpTargetConfig, timeout_seconds: float, max_response_bytes: int):
+    def __init__(
+        self,
+        config: HttpTargetConfig,
+        timeout_seconds: float,
+        max_response_bytes: int,
+        request_wait: Callable[[], float] | None = None,
+    ):
         self.config = config
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
+        self.request_wait = request_wait
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
     def execute(self, payload: bytes, case_id: str) -> ExecutionResult:
         start = _now()
+        if self.request_wait is not None:
+            self.request_wait()
         url = self._input_url(payload)
         body: bytes | None = payload if self.config.input_location == "body" else None
         headers = dict(self.config.headers)
@@ -495,7 +524,87 @@ class HttpTarget:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
-def build_target(config: TargetConfig, timeout_seconds: float, safety: SafetyConfig) -> Target:
+def _differential_fingerprint(result: ExecutionResult) -> str:
+    digest = hashlib.sha256()
+    digest.update(result.status.encode("utf-8"))
+    digest.update(str(result.returncode).encode("ascii"))
+    digest.update(str(result.response_status).encode("ascii"))
+    digest.update(result.stdout)
+    digest.update(result.stderr)
+    return digest.hexdigest()
+
+
+def _differential_summary(result: ExecutionResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "returncode": result.returncode,
+        "response_status": result.response_status,
+        "duration_ms": result.duration_ms,
+        "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
+    }
+
+
+def _combine_differential_output(left: bytes, right: bytes, label: bytes) -> bytes:
+    limit = 262_144
+    available = max(0, (limit - len(label) - 2) // 2)
+    return label + left[:available] + b"\n---RIGHT---\n" + right[:available]
+
+
+class DifferentialTarget:
+    """Compare two targets with the same generated input."""
+
+    def __init__(self, left: Target, right: Target):
+        self.left = left
+        self.right = right
+
+    def execute(self, payload: bytes, case_id: str) -> ExecutionResult:
+        start = _now()
+        left_result = self.left.execute(payload, f"{case_id}-left")
+        right_result = self.right.execute(payload, f"{case_id}-right")
+        divergent = _differential_fingerprint(left_result) != _differential_fingerprint(right_result)
+        if divergent:
+            status = "divergence"
+        elif left_result.is_finding or right_result.is_finding:
+            status = "shared_finding"
+        else:
+            status = "ok"
+        return ExecutionResult(
+            case_id=case_id,
+            status=status,
+            duration_ms=_duration(start),
+            input_size=len(payload),
+            returncode=left_result.returncode if left_result.returncode == right_result.returncode else None,
+            response_status=(
+                left_result.response_status
+                if left_result.response_status == right_result.response_status
+                else None
+            ),
+            stdout=_combine_differential_output(
+                left_result.stdout,
+                right_result.stdout,
+                b"---LEFT---\n",
+            ),
+            stderr=_combine_differential_output(
+                left_result.stderr,
+                right_result.stderr,
+                b"---LEFT-ERR---\n",
+            ),
+            metadata={
+                "differential": True,
+                "divergent": divergent,
+                "left": _differential_summary(left_result),
+                "right": _differential_summary(right_result),
+            },
+        )
+
+
+def build_target(
+    config: TargetConfig,
+    timeout_seconds: float,
+    safety: SafetyConfig,
+    request_wait: Callable[[], float] | None = None,
+) -> Target:
     """Construct a target adapter after re-checking network guardrails."""
 
     if isinstance(config, BinaryTargetConfig):
@@ -503,14 +612,34 @@ def build_target(config: TargetConfig, timeout_seconds: float, safety: SafetyCon
     if isinstance(config, TcpTargetConfig):
         if not safety.allow_network or not host_is_allowed(config.host, safety.allowed_hosts):
             raise ValueError("TCP target is not allowed by the network safety policy")
-        return TcpTarget(config, timeout_seconds, safety.max_response_bytes)
+        return TcpTarget(
+            config,
+            timeout_seconds,
+            safety.max_response_bytes,
+            request_wait,
+        )
     if isinstance(config, UdpTargetConfig):
         if not safety.allow_network or not host_is_allowed(config.host, safety.allowed_hosts):
             raise ValueError("UDP target is not allowed by the network safety policy")
-        return UdpTarget(config, timeout_seconds, safety.max_response_bytes)
+        return UdpTarget(
+            config,
+            timeout_seconds,
+            safety.max_response_bytes,
+            request_wait,
+        )
     if isinstance(config, HttpTargetConfig):
         host = urlsplit(config.url).hostname
         if not host or not safety.allow_network or not host_is_allowed(host, safety.allowed_hosts):
             raise ValueError("HTTP target is not allowed by the network safety policy")
-        return HttpTarget(config, timeout_seconds, safety.max_response_bytes)
+        return HttpTarget(
+            config,
+            timeout_seconds,
+            safety.max_response_bytes,
+            request_wait,
+        )
+    if isinstance(config, DifferentialTargetConfig):
+        return DifferentialTarget(
+            build_target(config.left, timeout_seconds, safety, request_wait),
+            build_target(config.right, timeout_seconds, safety, request_wait),
+        )
     raise TypeError(f"unsupported target configuration: {type(config).__name__}")

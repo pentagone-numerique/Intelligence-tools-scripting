@@ -208,6 +208,39 @@ class EngineTests(unittest.TestCase):
             self.assertTrue((summary.run_dir / "results.sqlite3").exists())
             self.assertEqual(len(list((summary.run_dir / "findings").glob("*.bin"))), 3)
 
+    def test_differential_target_finds_output_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            config_path = directory / "differential.toml"
+            left = json.dumps(
+                [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); print('left')"]
+            )
+            right = json.dumps(
+                [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); print('right')"]
+            )
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[run]",
+                        "name = 'differential'",
+                        "iterations = 1",
+                        "output_dir = " + json.dumps(str(directory / "artifacts")),
+                        "[corpus]",
+                        "inline = ['seed']",
+                        "[target]",
+                        "type = 'differential'",
+                        "[target.left]",
+                        f"type = 'binary'\ncommand = {left}",
+                        "[target.right]",
+                        f"type = 'binary'\ncommand = {right}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            summary = FuzzEngine(load_config(config_path)).run()
+            self.assertEqual(summary.findings, 1)
+            self.assertEqual(summary.statuses, {"divergence": 1})
+
     def test_minimizer_preserves_finding_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
