@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fuzz-orchestrator"
+version = "0.1.0"
+description = "Safety-first orchestrator for local binary and explicitly allow-listed network fuzzing"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Intelligence-tools-scripting contributors" }]
+dependencies = []
+
+[project.scripts]
+fuzz-orchestrator = "fuzz_orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fuzz_orchestrator*"]
+
+[tool.setuptools]
+include-package-data = true
