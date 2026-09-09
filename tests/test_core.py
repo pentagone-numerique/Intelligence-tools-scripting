@@ -18,6 +18,7 @@ from fuzz_orchestrator.engine import FuzzEngine
 from fuzz_orchestrator.external import ExternalFuzzEngine
 from fuzz_orchestrator.minimize import minimize_payload
 from fuzz_orchestrator.models import BinaryTargetConfig, MutationConfig
+from fuzz_orchestrator.native_corpus import NativeCorpusClient, NativeCorpusEntry
 from fuzz_orchestrator.mutations import Mutator
 from fuzz_orchestrator.targets import BinaryTarget
 
@@ -45,6 +46,52 @@ class MutationTests(unittest.TestCase):
         second = mutator.mutate(corpus[0], random.Random(42), corpus)
         self.assertEqual(first, second)
         self.assertLessEqual(len(first), 32)
+
+
+class NativeCorpusTests(unittest.TestCase):
+    def test_local_protocol_client_uses_argument_array_and_parses_entries(self) -> None:
+        worker = textwrap.dedent(
+            """
+            import sys
+            for raw in sys.stdin:
+                fields = raw.strip().split()
+                if not fields:
+                    continue
+                if fields[0] == "HELLO":
+                    print("HELLO 1 fake-worker", flush=True)
+                elif fields[0] == "PING":
+                    print("PONG", flush=True)
+                elif fields[0] == "ADD":
+                    print(f"ENTRY 1 - 3 0 {fields[2]} 0 0 -", flush=True)
+                elif fields[0] == "NEXT":
+                    print("ENTRY 1 - 3 0 YWJj 0 0 -", flush=True)
+                elif fields[0] == "FEEDBACK":
+                    print("OK FEEDBACK", flush=True)
+                elif fields[0] == "STATS":
+                    print("STATS 1 3 100 1024", flush=True)
+                elif fields[0] == "QUIT":
+                    print("BYE", flush=True)
+                    break
+            """
+        )
+        client = NativeCorpusClient(
+            (sys.executable, "-u", "-c", worker),
+            strategy="feedback",
+            max_entries=100,
+            max_bytes=1024,
+            max_input_bytes=64,
+        )
+        try:
+            client.ping()
+            added = client.add(bytes([0]) + b"seed")
+            self.assertIsInstance(added, NativeCorpusEntry)
+            self.assertEqual(added.input_id, 1)
+            self.assertEqual(added.data, bytes([0]) + b"seed")
+            self.assertEqual(client.next().data, b"abc")
+            client.feedback(1, energy=10, favored=True, new_edges=2, interesting=True, bitmap_hash=b"x" * 32)
+            self.assertEqual(client.stats().entries, 1)
+        finally:
+            client.close()
 
 
 class ConfigTests(unittest.TestCase):

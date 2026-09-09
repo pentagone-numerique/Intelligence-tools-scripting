@@ -51,7 +51,8 @@ Un exemple de cible locale est disponible dans `examples/targets/demo_binary.py`
 
 Le socle de migration SALOMON est documenté dans `docs/architecture.md`, avec
 les contrats Rust dans `rust/crates/salomon-core`, le Corpus Manager/Scheduler
-natif dans `rust/crates/salomon-corpus` et le protocole de contrôle futur dans
+natif dans `rust/crates/salomon-corpus`, le pont IPC local dans
+`rust/crates/salomon-corpusd` et le protocole de contrôle futur dans
 `proto/salomon.proto`.
 
 ## Configuration TOML

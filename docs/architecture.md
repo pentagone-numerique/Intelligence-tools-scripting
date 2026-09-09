@@ -38,9 +38,11 @@ Les concepts partagés sont :
 - `CampaignStats`.
 
 Les contrats Rust sont dans `rust/crates/salomon-core`. Le premier Corpus
-Manager/Scheduler natif est dans `rust/crates/salomon-corpus`; il reste
-optionnel tant que la frontière FFI n'est pas figée. Le protocole de contrôle
-pour la future distribution est dans `proto/salomon.proto`.
+Manager/Scheduler natif est dans `rust/crates/salomon-corpus`. Un pont IPC local
+versionné est fourni par `rust/crates/salomon-corpusd` et son client Python
+optionnel dans `fuzz_orchestrator/native_corpus.py`; il ne remplace pas encore
+le backend Python par défaut. Le protocole de contrôle distribué est dans
+`proto/salomon.proto`.
 
 Le protocole gRPC ne doit pas transporter chaque cas dans le hot path. Un worker
 exécute localement une boucle complète et échange périodiquement des deltas de

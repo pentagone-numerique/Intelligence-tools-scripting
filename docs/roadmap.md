@@ -14,7 +14,8 @@
 - [x] Corpus Manager Rust borné et dédoublonné
 - [x] scheduler random/feedback pondéré et reproductible
 - [x] index de couverture natif sur bitmap 65 536 octets
-- [ ] frontière FFI/IPC avec le moteur Python
+- [x] protocole IPC local v1 et client Python optionnel
+- [ ] intégration batch FFI/IPC dans le moteur Python
 - [ ] forkserver POSIX
 - [ ] import/export AFL++ queue
 

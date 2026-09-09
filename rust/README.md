@@ -8,7 +8,9 @@ la référence d'exécution.
 - `salomon-core` : contrats partagés entre l'exécuteur, le corpus et le
   feedback ;
 - `salomon-corpus` : corpus borné, dédoublonnage exact, scheduler reproductible
-  random/feedback et index bitmap de couverture.
+  random/feedback et index bitmap de couverture ;
+- `salomon-corpusd` : helper IPC local v1, démarré comme enfant et non exposé
+  sur le réseau.
 
 ## Vérification
 

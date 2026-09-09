@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/salomon-core",
     "crates/salomon-corpus",
+    "crates/salomon-corpusd",
 ]
 
 [workspace.package]
